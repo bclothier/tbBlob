@@ -1,0 +1,38 @@
+# vcpkg install trees (rebuildable from vcpkg.json)
+CastXML/vcpkg_installed/
+libgit2/vcpkg_installed/
+libgit2/vcpkg_installed_x86/
+
+# twinBASIC build output (except the import/export tool the workflow depends on, D-047)
+Build/
+tools/impexp/Build/*
+!tools/impexp/Build/tBImportExport_win64.exe
+spikes/**/Build/
+
+# tbBlob.twinproj is rebuilt from Source\ by tests\import.ps1 (D-010)
+/tbBlob.twinproj
+
+# Test build outputs and generated bindings
+tests/**/bin/
+tests/**/Build/
+tests/harness-*/bindings/
+tests/harness-*/project/
+tests/harness-*/results/
+tests/harness-*/*.twinproj
+*.work/
+
+# Spike artifacts that scripts regenerate
+spikes/castxml-ffi-generator/xml/
+spikes/castxml-ffi-generator/bin/
+spikes/castxml-ffi-generator/fixture/
+spikes/castxml-ffi-generator/probe/
+spikes/castxml-ffi-generator/probe.twinproj
+tests/harness-*/fixture/
+tests/harness-*/bindings.new/
+
+# tools\package.ps1 output
+dist/
+spikes/threads/bin/
+spikes/threads/project/
+spikes/threads/results/
+spikes/threads/threadprobe.twinproj

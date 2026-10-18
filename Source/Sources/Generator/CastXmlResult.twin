@@ -1,0 +1,9 @@
+' What RunCastXml produced: the four output files, and on failure the exit code and why.
+Class CastXmlResult
+    Public Xml86Path As String
+    Public Xml64Path As String
+    Public Macros86Path As String    ' macro dump of the x86 compiler (D-030)
+    Public Macros64Path As String
+    Public ExitCode As Long
+    Public ErrorText As String
+End Class

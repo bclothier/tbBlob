@@ -1,0 +1,268 @@
+' One CastXML output file, loaded with MSXML6 (D-013) and indexed by id. Only declarations from
+' files under the header folder count as the library's (InLibrary). CastXML's size, align and
+' offset are in bits; the *Bytes helpers convert them (PRD section 7.2 item 7).
+Class CxModel
+    Public LoadMilliseconds As Long
+    ' Why Load failed ("" if it did not). Read this rather than Err.Description: an error raised
+    ' inside a class method can reach the caller as a bare "Automation error" (D-019).
+    Public LoadError As String
+
+    Private Const LOAD_FAILED As Long = vbObjectError + &H1300
+
+    ' Early-bound MSXML 6 (D-040): every CastXML node tbBlob handles is an element, typed
+    ' MSXML2.IXMLDOMElement here and in its callers (CastXML output has no text or comment nodes).
+    Private mDoc As MSXML2.DOMDocument60
+    ' Keyed tB Collections with case-sensitive keys (D-040, D-041: ~0.2 us a lookup, where a
+    ' Scripting.Dictionary costs ~100 us from tbBlob's MTA thread).
+    Private mById As Collection         ' id -> element
+    Private mFiles As Collection        ' file id -> path with backslashes
+    Private mFileInLib As Collection    ' file id -> Boolean
+    Private mAnon As Collection         ' anonymous struct/union/enum id -> typedef name
+    Private mByTagName As Collection    ' "tag|name" -> the first such element (FindElement, D-038)
+    Private mFunctions As Collection
+    Private mRecords As Collection
+    Private mEnums As Collection
+    Private mTypedefs As Collection
+    Private mOpaque As Collection
+    Private mPtrSize As Long
+
+    ' Loads path; headerFolder decides which declarations belong to the library. Raises an error
+    ' naming the file and the parser's reason when the file is missing or not well-formed XML.
+    Public Sub Load(ByVal path As String, ByVal headerFolder As String)
+        Dim started As Double = Timer
+        LoadError = ""
+        If FileSys.KindOf(path) <> FileSys.KIND_FILE Then
+            LoadError = "CastXML file not found: " & path
+            Err.Raise LOAD_FAILED, , LoadError
+        End If
+        Set mDoc = Nothing
+        On Error Resume Next
+        Set mDoc = New MSXML2.DOMDocument60
+        Dim createError As String = Err.Description
+        On Error GoTo 0
+        If mDoc Is Nothing Then
+            LoadError = "MSXML 6 is not available (" & createError & "): it is part of Windows; tbBlob --check lists every dependency"
+            Err.Raise LOAD_FAILED, , LoadError
+        End If
+        mDoc.async = False
+        mDoc.validateOnParse = False
+        mDoc.resolveExternals = False
+        If Not mDoc.Load(path) Then
+            Dim pe As MSXML2.IXMLDOMParseError = mDoc.parseError
+            LoadError = "cannot parse " & path & " (line " & pe.Line & ", column " & pe.linepos & "): " & Trim$(Replace(Replace(pe.reason, vbCr, " "), vbLf, " "))
+            Err.Raise LOAD_FAILED, , LoadError
+        End If
+
+        Set mById = New Collection
+        mById.KeyCompareMode = vbBinaryCompare
+        Set mFiles = New Collection
+        mFiles.KeyCompareMode = vbBinaryCompare
+        Set mFileInLib = New Collection
+        mFileInLib.KeyCompareMode = vbBinaryCompare
+        Set mAnon = New Collection
+        mAnon.KeyCompareMode = vbBinaryCompare
+        Set mByTagName = New Collection
+        mByTagName.KeyCompareMode = vbBinaryCompare
+        Set mFunctions = New Collection
+        Set mRecords = New Collection
+        Set mEnums = New Collection
+        Set mTypedefs = New Collection
+        Set mOpaque = New Collection
+
+        Dim prefix As String = LCase$(FileSys.FullPath(Replace(headerFolder, "/", "\"))) & "\"
+        Dim node As MSXML2.IXMLDOMElement, id As String, filePath As String, nm As String, key As String
+        For Each node In mDoc.documentElement.childNodes
+            If node.nodeType = 1 Then
+                id = Attr(node, "id")
+                If Len(id) > 0 Then mById.Add node, id
+                nm = Attr(node, "name")
+                If Len(nm) > 0 Then
+                    key = node.nodeName & "|" & nm
+                    If Not mByTagName.Exists(key) Then mByTagName.Add node, key
+                End If
+                If node.nodeName = "File" Then
+                    filePath = Replace(Attr(node, "name"), "/", "\")
+                    mFiles.Add filePath, id
+                    mFileInLib.Add (LCase$(Left$(filePath, Len(prefix))) = prefix), id
+                End If
+            End If
+        Next
+
+        ' Anonymous struct/union/enum declared through a typedef takes the typedef's name.
+        Dim target As MSXML2.IXMLDOMElement
+        For Each node In mDoc.documentElement.childNodes
+            If node.nodeType = 1 Then
+                If node.nodeName = "Typedef" Then
+                    Set target = Strip(Attr(node, "type"))
+                    If Not target Is Nothing Then
+                        Select Case target.nodeName
+                            Case "Struct", "Union", "Enumeration"
+                                If Len(Attr(target, "name")) = 0 And Not mAnon.Exists(Attr(target, "id")) Then mAnon.Add Attr(node, "name"), Attr(target, "id")
+                        End Select
+                    End If
+                End If
+            End If
+        Next
+
+        For Each node In mDoc.documentElement.childNodes
+            If node.nodeType = 1 Then
+                If InLibrary(node) Then
+                    Select Case node.nodeName
+                        Case "Function": mFunctions.Add node
+                        Case "Struct", "Union"
+                            If IsOpaque(node) Then
+                                mOpaque.Add node
+                            ElseIf Len(NameOf(node)) > 0 Then
+                                mRecords.Add node
+                            End If
+                        Case "Enumeration": mEnums.Add node
+                        Case "Typedef": mTypedefs.Add node
+                    End Select
+                End If
+            End If
+        Next
+        LoadMilliseconds = CLng((Timer - started) * 1000)
+    End Sub
+
+    ' The element with this id, or Nothing.
+    Public Function ById(ByVal id As String) As MSXML2.IXMLDOMElement
+        If mById Is Nothing Then Return Nothing
+        If Not mById.Exists(id) Then Return Nothing
+        Return mById(id)
+    End Function
+
+    ' An attribute's value, "" when absent.
+    Public Function Attr(ByVal el As MSXML2.IXMLDOMElement, ByVal name As String) As String
+        If el Is Nothing Then Return ""
+        Dim v As Variant = el.getAttribute(name)
+        If IsNull(v) Then Return ""
+        Return CStr(v)
+    End Function
+
+    ' The first element anywhere in the file (library or not) with this tag and name, or Nothing.
+    ' An index lookup (built by Load) rather than a scan of the document (D-038).
+    Public Function FindElement(ByVal tagName As String, ByVal name As String) As MSXML2.IXMLDOMElement
+        If mByTagName Is Nothing Then Return Nothing
+        Dim key As String = tagName & "|" & name
+        If Not mByTagName.Exists(key) Then Return Nothing
+        Return mByTagName(key)
+    End Function
+
+    ' The pointer size of the architecture this file was made for (4 or 8).
+    Public Function PointerSize() As Long
+        If mPtrSize > 0 Then Return mPtrSize
+        mPtrSize = 8
+        Dim node As MSXML2.IXMLDOMElement
+        For Each node In mDoc.documentElement.childNodes
+            If node.nodeType = 1 Then
+                If node.nodeName = "PointerType" Then
+                    If Len(Attr(node, "size")) > 0 Then
+                        mPtrSize = SizeBytes(node)
+                        Exit For
+                    End If
+                End If
+            End If
+        Next
+        Return mPtrSize
+    End Function
+
+    ' The element's tag, e.g. "Function", "Struct".
+    Public Function Tag(ByVal el As MSXML2.IXMLDOMElement) As String
+        If el Is Nothing Then Return ""
+        Return el.nodeName
+    End Function
+
+    ' Full path (backslashes) of the file the declaration is in; "" for none.
+    Public Function FileOf(ByVal el As MSXML2.IXMLDOMElement) As String
+        Dim fid As String = Attr(el, "file")
+        If Len(fid) = 0 Or Not mFiles.Exists(fid) Then Return ""
+        Return mFiles(fid)
+    End Function
+
+    ' True when the declaration's file is under the header folder.
+    Public Function InLibrary(ByVal el As MSXML2.IXMLDOMElement) As Boolean
+        Dim fid As String = Attr(el, "file")
+        If Len(fid) = 0 Or Not mFileInLib.Exists(fid) Then Return False
+        Return mFileInLib(fid)
+    End Function
+
+    ' The struct/union/enum name, or the typedef name of an anonymous one; "" if neither.
+    Public Function NameOf(ByVal el As MSXML2.IXMLDOMElement) As String
+        Dim n As String = Attr(el, "name")
+        If Len(n) > 0 Then Return n
+        Dim id As String = Attr(el, "id")
+        If Len(id) > 0 And mAnon.Exists(id) Then Return mAnon(id)
+        Return ""
+    End Function
+
+    ' The type element for id, skipping CvQualifiedType and ElaboratedType.
+    Public Function Strip(ByVal id As String) As MSXML2.IXMLDOMElement
+        Dim el As MSXML2.IXMLDOMElement = ById(id)
+        Do While Not el Is Nothing
+            Select Case el.nodeName
+                Case "CvQualifiedType", "ElaboratedType"
+                    Set el = ById(Attr(el, "type"))
+                Case Else
+                    Exit Do
+            End Select
+        Loop
+        Return el
+    End Function
+
+    Public Function SizeBytes(ByVal el As MSXML2.IXMLDOMElement) As Long
+        Return CLng(Val(Attr(el, "size"))) \ 8
+    End Function
+
+    Public Function AlignBytes(ByVal el As MSXML2.IXMLDOMElement) As Long
+        Return CLng(Val(Attr(el, "align"))) \ 8
+    End Function
+
+    Public Function OffsetBytes(ByVal field As MSXML2.IXMLDOMElement) As Long
+        Return CLng(Val(Attr(field, "offset"))) \ 8
+    End Function
+
+    ' A struct/union declared but never defined (incomplete="1").
+    Public Function IsOpaque(ByVal el As MSXML2.IXMLDOMElement) As Boolean
+        Return Attr(el, "incomplete") = "1"
+    End Function
+
+    ' A function or function type whose arguments end with "...".
+    Public Function HasEllipsis(ByVal el As MSXML2.IXMLDOMElement) As Boolean
+        Dim child As MSXML2.IXMLDOMElement
+        If el Is Nothing Then Return False
+        For Each child In el.childNodes
+            If child.nodeName = "Ellipsis" Then Return True
+        Next
+        Return False
+    End Function
+
+    ' The element's Comment element, or Nothing.
+    Public Function CommentOf(ByVal el As MSXML2.IXMLDOMElement) As MSXML2.IXMLDOMElement
+        Dim cid As String = Attr(el, "comment")
+        If Len(cid) = 0 Then Return Nothing
+        Return ById(cid)
+    End Function
+
+    ' The library's declarations, in document order.
+    Public Function Functions() As Collection
+        Return mFunctions
+    End Function
+
+    ' Complete structs and unions with a name (their own or a typedef's).
+    Public Function Records() As Collection
+        Return mRecords
+    End Function
+
+    Public Function Enumerations() As Collection
+        Return mEnums
+    End Function
+
+    Public Function Typedefs() As Collection
+        Return mTypedefs
+    End Function
+
+    ' The library's incomplete (opaque) structs and unions, in document order.
+    Public Function OpaqueStructs() As Collection
+        Return mOpaque
+    End Function
+End Class

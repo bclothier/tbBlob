@@ -1,0 +1,176 @@
+' Where generation time goes (task 16, D-037/D-038): times tbBlob's building blocks on the
+' libgit2+sys CastXML output the libgit2 harness generated. Integration only; always passes,
+' reports the numbers with SelfTest.Info. Needs tests\harness-libgit2\bindings\Work.
+Module Tests_Perf
+    Public Const MODULE_ID As Long = 11
+
+    Private Declare PtrSafe Function QueryPerformanceCounter Lib "kernel32" (ByRef count As LongLong) As Long
+    Private Declare PtrSafe Function QueryPerformanceFrequency Lib "kernel32" (ByRef freq As LongLong) As Long
+
+    Public Sub Register()
+        SelfTest.Add "perf: time per building block on libgit2+sys (reported, not judged)", MODULE_ID, 1, True
+    End Sub
+
+    Public Sub RunTest(ByVal index As Long)
+        Select Case index
+            Case 1: BuildingBlocks
+            Case Else: Err.Raise SelfTest.CHECK_FAILED, , "no test " & index & " in Tests_Perf"
+        End Select
+    End Sub
+
+    Private Function Now64() As LongLong
+        Dim c As LongLong
+        QueryPerformanceCounter c
+        Return c
+    End Function
+
+    Private Function Ms(ByVal t0 As LongLong) As Double
+        Dim f As LongLong
+        QueryPerformanceFrequency f
+        Return (Now64() - t0) * 1000# / f
+    End Function
+
+    Private Sub Report(ByVal what As String, ByVal ms As Double, Optional ByVal calls As Long = 0)
+        If calls > 0 Then
+            SelfTest.Info Left$(what & Space$(46), 46) & Format$(ms, "0") & " ms  (" & calls & " calls, " & Format$(ms * 1000# / calls, "0.0") & " us each)"
+        Else
+            SelfTest.Info Left$(what & Space$(46), 46) & Format$(ms, "0") & " ms"
+        End If
+    End Sub
+
+    Private Sub BuildingBlocks()
+        Dim root As String = SelfTest.RepoRoot()
+        Dim work As String = root & "\tests\harness-libgit2\bindings\Work"
+        Dim inc As String = root & "\libgit2\vcpkg_installed\x64-windows\include"
+        Dim t As LongLong, i As Long, n As Long, el As Object, s As String
+
+        t = Now64()
+        Dim m64 As New CxModel
+        m64.Load work & "\castxml_x64.xml", inc
+        Dim m86 As New CxModel
+        m86.Load work & "\castxml_x86.xml", inc
+        Report "load both XMLs", Ms(t)
+
+        ' unit costs
+        Dim fns As Collection = m64.Functions()
+        Dim first As Object = fns(1)
+        t = Now64()
+        For i = 1 To 100000
+            s = m64.Attr(first, "name")
+        Next
+        Report "CxModel.Attr (getAttribute, early-bound)", Ms(t), 100000
+        Dim id As String = m64.Attr(first, "id")
+        t = Now64()
+        For i = 1 To 100000
+            Set el = m64.ById(id)
+        Next
+        Report "CxModel.ById (keyed tB Collection)", Ms(t), 100000
+        t = Now64()
+        For i = 1 To 100000
+            n = el.childNodes.length
+        Next
+        Report "node.childNodes.length (late-bound MSXML)", Ms(t), 100000
+        Dim d As Object = CreateObject("Scripting.Dictionary")
+        d.Add "key", 1
+        t = Now64()
+        For i = 1 To 100000
+            If d.Exists("key") Then n = d("key")
+        Next
+        Report "Scripting.Dictionary Exists + Item (late-bound)", Ms(t), 100000
+
+        ' D-040/D-041: keyed tB Collection (explicit binary compare) vs Scripting.Dictionary, one key
+        ' and 20,000 keys (about the size of CxModel's id index); early- vs late-bound MSXML
+        Dim c As New Collection
+        c.KeyCompareMode = vbBinaryCompare
+        c.Add 1, "key"
+        t = Now64()
+        For i = 1 To 100000
+            If c.Exists("key") Then n = c("key")
+        Next
+        Report "tB Collection Exists + Item (binary keys)", Ms(t), 100000
+        ' (an early-bound Scripting.Dictionary measured 104 us a call -- D-041; its reference is removed)
+
+        Dim keys(0 To 19999) As String
+        For i = 0 To 19999
+            keys(i) = "_" & (i * 7)
+        Next
+        Dim bigC As New Collection
+        bigC.KeyCompareMode = vbBinaryCompare
+        Dim bigL As Object = CreateObject("Scripting.Dictionary")
+        For i = 0 To 19999
+            bigC.Add i, keys(i)
+            bigL.Add keys(i), i
+        Next
+        t = Now64()
+        For i = 1 To 100000
+            If bigC.Exists(keys(i Mod 20000)) Then n = bigC(keys(i Mod 20000))
+        Next
+        Report "tB Collection, 20,000 keys", Ms(t), 100000
+        t = Now64()
+        For i = 1 To 10000
+            If bigL.Exists(keys(i Mod 20000)) Then n = bigL(keys(i Mod 20000))
+        Next
+        Report "Scripting.Dictionary late-bound, 20,000 keys", Ms(t), 10000
+
+        Dim xe As MSXML2.IXMLDOMElement
+        Set xe = first
+        Dim v As Variant
+        t = Now64()
+        For i = 1 To 100000
+            v = xe.getAttribute("name")
+        Next
+        Report "MSXML getAttribute (early-bound element)", Ms(t), 100000
+        Dim lateEl As Object = first
+        t = Now64()
+        For i = 1 To 100000
+            v = lateEl.getAttribute("name")
+        Next
+        Report "MSXML getAttribute (late-bound, As Object)", Ms(t), 100000
+
+        ' building blocks over the whole library
+        Dim t64 As New TypeMapper
+        t64.Init m64
+        Dim t86 As New TypeMapper
+        t86.Init m86
+        t = Now64()
+        For Each el In fns
+            s = t64.SignatureText(el)
+        Next
+        Report "SignatureText, every function (x64)", Ms(t), fns.Count
+        Dim ignored As Collection
+        t = Now64()
+        For Each el In fns
+            Set ignored = t64.ParamsOf(el)
+        Next
+        Report "ParamsOf, every function (x64)", Ms(t), fns.Count
+        t = Now64()
+        For Each el In m64.Records()
+            Set ignored = t64.FieldsOf(el)
+        Next
+        Report "FieldsOf, every record (x64)", Ms(t), m64.Records().Count
+        t = Now64()
+        For Each el In fns
+            s = DocComments.DocRaw(m64, el)
+        Next
+        Report "DocComments.DocRaw, every function", Ms(t), fns.Count
+        t = Now64()
+        Set ignored = t64.Disagreements(t86)
+        Report "TypeMapper.Disagreements (consistency stage)", Ms(t)
+
+        Dim macros As New MacroTable
+        macros.ParseDump FileSys.ReadTextUtf8(work & "\macros_x64.txt")
+        macros.ScanLibrary inc
+        Dim macros86 As New MacroTable
+        macros86.ParseDump FileSys.ReadTextUtf8(work & "\macros_x86.txt")
+        macros86.ScanLibrary inc
+        t = Now64()
+        Dim e As New Emitter
+        e.Init t64, t86, macros, "git2.dll", inc, "git2"
+        e.UseX86Macros macros86
+        Report "Emitter.Init (names: RegisterLibrary)", Ms(t)
+        t = Now64()
+        e.Generate
+        Report "Emitter.Generate", Ms(t)
+        SelfTest.AssertTrue "generated", e.CountOf("functions") > 900, "functions " & e.CountOf("functions")
+    End Sub
+End Module

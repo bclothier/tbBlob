@@ -1,0 +1,571 @@
+' Runtime checks of the tbfixture bindings that tbBlob generated (task 11, PRD req. 39-44).
+' Each group runs under its own error handler, so an error is a FAIL line, not the end of the run.
+' Known values come from tests\fixture-c\tbfixture.h.
+Module Harness
+    Private Declare PtrSafe Function GetModuleFileNameW Lib "kernel32" (ByVal hModule As LongPtr, ByVal lpFilename As LongPtr, ByVal nSize As Long) As Long
+    Private Declare PtrSafe Function GetModuleHandleW Lib "kernel32" (ByVal lpModuleName As LongPtr) As LongPtr
+    Private Declare PtrSafe Function GetCurrentThreadId Lib "kernel32" () As Long
+    Private Declare PtrSafe Function CoInitializeEx Lib "ole32" (ByVal pvReserved As LongPtr, ByVal dwCoInit As Long) As Long
+    Private Declare PtrSafe Sub CoUninitialize Lib "ole32" ()
+    Private Const COINIT_MULTITHREADED As Long = 0
+    Private Const GROUPS As Long = 19
+
+    Private mVisits As Long
+    Private mNotified As Long
+    Private mBadContext As Long
+
+    Public Sub Main()
+        Results.Start
+        Dim p As LongPtr
+        Results.Info "0.arch", Results.Arch() & " LenB(LongPtr)=" & LenB(p)
+        If Not PreloadDll() Then
+            Results.Info "0.summary", "passed=" & Results.Passed & " failed=" & Results.Failed
+            Exit Sub
+        End If
+        Dim g As Long
+        For g = 1 To GROUPS
+            RunGroup g
+        Next
+        Results.Info "0.summary", "passed=" & Results.Passed & " failed=" & Results.Failed
+    End Sub
+
+    ' D-008, D-027: bind every Lib "tbfixture.dll" declare to the DLL built for this architecture,
+    ' through the generated loader (bin\win32 or bin\win64 is picked by the arch subfolder rule).
+    Private Function PreloadDll() As Boolean
+        Results.Check "0.loader IsLoaded before Load", Not tbfixture_Loader.IsLoaded()
+        Dim missing As String = Results.HarnessDir() & "\nowhere"
+        Dim msg As String = LoadError(missing)
+        Results.Check "0.loader Load of a missing folder names the paths tried", _
+            InStr(msg, "cannot load tbfixture.dll: tried " & missing & "\" & Results.Arch() & "\tbfixture.dll (not found); " & missing & "\tbfixture.dll (not found)") > 0, msg
+        Dim bin As String = Results.HarnessDir() & "\..\fixture-c\bin"
+        Dim h As LongPtr = LoadHandle(bin, msg)
+        Results.Check "0.loader Load(bin) picks this architecture's subfolder", h <> 0, If(h = 0, msg, bin)
+        If h = 0 Then Return False
+        Results.Check "0.loader IsLoaded after Load", tbfixture_Loader.IsLoaded()
+        Results.Check "0.loader LoadFile of the same DLL gives the same module", _
+            tbfixture_Loader.LoadFile(bin & "\" & Results.Arch() & "\tbfixture.dll") = h
+        Dim buf As String = String$(1024, vbNullChar)
+        Dim n As Long = GetModuleFileNameW(h, StrPtr(buf), 1024)
+        Dim loaded As String = Left$(buf, n)
+        Results.Check "0.loaded module is this architecture's DLL", LCase$(loaded) Like "*\fixture-c\bin\" & Results.Arch() & "\tbfixture.dll", loaded
+        Results.Check "0.Lib ""tbfixture.dll"" resolves to that module", GetModuleHandleW(StrPtr("tbfixture.dll")) = h
+        Return True
+    End Function
+
+    Private Function LoadHandle(ByVal folder As String, ByRef msg As String) As LongPtr
+        On Error GoTo failed
+        Return tbfixture_Loader.Load(folder)
+    failed:
+        msg = Err.Number & ": " & Err.Description
+        Return 0
+    End Function
+
+    Private Function LoadError(ByVal folder As String) As String
+        Dim msg As String
+        If LoadHandle(folder, msg) <> 0 Then Return "(loaded: no error raised)"
+        Return msg
+    End Function
+
+    Private Sub RunGroup(ByVal g As Long)
+        On Error GoTo failed
+        Select Case g
+            Case 1: Layout
+            Case 2: Scalars
+            Case 3: ScalarReturns
+            Case 4: Pointers
+            Case 5: StringChecks
+            Case 6: Handles
+            Case 7: StructsByValue
+            Case 8: NestedAndArrays
+            Case 9: Callbacks
+            Case 10: Unions
+            Case 11: BitfieldsAndPacking
+            Case 12: Variadics
+            Case 13: Enums
+            Case 14: MacroConstants
+            Case 15: TypeAliases
+            Case 16: Naming
+            Case 17: ExtraHeader
+            Case 18: LibraryThreads
+            Case 19: LibraryMemory
+        End Select
+        Exit Sub
+    failed:
+        Results.Fail "group " & g & " raised an error", Err.Number & ": " & Err.Description
+    End Sub
+
+    ' ---- 1. layout: generated expectations, and MSVC's own table (PRD req. 42) ----------------
+    Private Sub Layout()
+        Dim mismatches As String = tbfixture_LayoutCheck.LayoutMismatches()
+        Results.Check "1.layout generated expectations", Len(mismatches) = 0, Replace(mismatches, vbLf, "; ")
+        Dim count As LongPtr
+        Dim table As LongPtr = tbf_layout_table(count)
+        Results.Check "1.layout table returned", table <> 0 And count > 0, "rows=" & count
+        Dim e As TBF_LAYOUT_ENTRY, i As Long, rec As String, fld As String, rows As Long, bad As String
+        For i = 0 To CLng(count) - 1
+            RtlMoveMemory VarPtr(e), table + i * LenB(e), LenB(e)
+            rec = FromUtf8(e.record)
+            fld = If(e.field = 0, "", FromUtf8(e.field))
+            Dim tbValue As Long = tbfixture_LayoutCheck.TbLayout(rec, fld)
+            If rec = "TBF_ALIGNED" Then
+                Results.CheckEq "1.layout " & rec & "." & fld & " has no tB layout (over-aligned)", tbValue, -1
+            Else
+                rows += 1
+                If tbValue <> CLng(e.value) Then bad &= rec & If(Len(fld) > 0, "." & fld, " size") & ": tB " & tbValue & " <> MSVC " & CLng(e.value) & "; "
+            End If
+        Next
+        Results.Check "1.layout tB = MSVC for " & rows & " rows", Len(bad) = 0, bad
+        Results.Check "1.layout over-aligned TBF_ALIGNED reported", InStr(ReportText(), "TBF_ALIGNED: over-aligned") > 0
+    End Sub
+
+    Private Function ReportText() As String
+        Dim f As Integer = FreeFile
+        Open Results.HarnessDir() & "\bindings\report.md" For Binary Access Read As #f
+        Dim s As String = Space$(LOF(f))
+        Get #f, , s
+        Close #f
+        Return s
+    End Function
+
+    ' ---- 2-3. scalars -------------------------------------------------------------------------
+    ' Unsigned C values are passed as the signed tB value with the same bits.
+    Private Sub Scalars()
+        Results.CheckEq "2.check_scalars (args)", tbf_check_scalars(65, 254, 200, -30000, -5536, -2000000000, -294967296, _
+            -123456789, -1294967296, -1234567890123456789^, -446744073709551616^, 1.5, -2.25, 1, 123456, -7, &H3A9), 0
+        Dim s As TBF_SCALARS
+        tbf_fill_scalars s
+        Results.CheckEq "2.fill c", s.c, 65
+        Results.CheckEq "2.fill sc", s.sc, 254
+        Results.CheckEq "2.fill uc", s.uc, 200
+        Results.CheckEq "2.fill s", s.s, -30000
+        Results.CheckEq "2.fill us", s.us, -5536
+        Results.CheckEq "2.fill i", s.i, -2000000000
+        Results.CheckEq "2.fill ui", s.ui, -294967296
+        Results.CheckEq "2.fill l", s.l, -123456789
+        Results.CheckEq "2.fill ul", s.ul, -1294967296
+        Results.CheckEq "2.fill ll", s.ll, -1234567890123456789^
+        Results.CheckEq "2.fill ull", s.ull, -446744073709551616^
+        Results.CheckEq "2.fill f", s.f, 1.5
+        Results.CheckEq "2.fill d", s.d, -2.25
+        Results.CheckEq "2.fill b", s.b, 1
+        Results.CheckEq "2.fill z", s.z, 123456
+        Results.CheckEq "2.fill ip", s.ip, -7
+        Results.CheckEq "2.fill wc", s.wc, &H3A9
+        Results.CheckEq "2.check_scalars_struct (filled)", tbf_check_scalars_struct(s), 0
+        Dim t As TBF_SCALARS
+        t.c = 65: t.sc = 254: t.uc = 200: t.s = -30000: t.us = -5536: t.i = -2000000000: t.ui = -294967296
+        t.l = -123456789: t.ul = -1294967296: t.ll = -1234567890123456789^: t.ull = -446744073709551616^
+        t.f = 1.5: t.d = -2.25: t.b = 1: t.z = 123456: t.ip = -7: t.wc = &H3A9
+        Results.CheckEq "2.check_scalars_struct (set in tB)", tbf_check_scalars_struct(t), 0
+        t.wc = 0
+        Results.CheckEq "2.check_scalars_struct reports the wrong field", tbf_check_scalars_struct(t), 17
+    End Sub
+
+    Private Sub ScalarReturns()
+        Results.CheckEq "3.ret char", tbf_ret_char(), 65
+        Results.CheckEq "3.ret schar", tbf_ret_schar(), 254
+        Results.CheckEq "3.ret uchar", tbf_ret_uchar(), 200
+        Results.CheckEq "3.ret short", tbf_ret_short(), -30000
+        Results.CheckEq "3.ret ushort", tbf_ret_ushort(), -5536
+        Results.CheckEq "3.ret int", tbf_ret_int(), -2000000000
+        Results.CheckEq "3.ret uint", tbf_ret_uint(), -294967296
+        Results.CheckEq "3.ret long", tbf_ret_long(), -123456789
+        Results.CheckEq "3.ret ulong", tbf_ret_ulong(), -1294967296
+        Results.CheckEq "3.ret llong", tbf_ret_llong(), -1234567890123456789^
+        Results.CheckEq "3.ret ullong", tbf_ret_ullong(), -446744073709551616^
+        Results.CheckEq "3.ret float", tbf_ret_float(), 1.5
+        Results.CheckEq "3.ret double", tbf_ret_double(), -2.25
+        Results.CheckEq "3.ret bool", tbf_ret_bool(), 1
+        Results.CheckEq "3.ret size", tbf_ret_size(), 123456
+        Results.CheckEq "3.ret intptr", tbf_ret_intptr(), -7
+        Results.CheckEq "3.ret wchar", tbf_ret_wchar(), &H3A9
+    End Sub
+
+    ' ---- 4. pointers --------------------------------------------------------------------------
+    Private Sub Pointers()
+        Dim n As Long = 41
+        Results.CheckEq "4.inc_int returns", tbf_inc_int(n), 42
+        Results.CheckEq "4.inc_int writes back", n, 42
+        Dim a(0 To 3) As Long
+        a(0) = 1: a(1) = 2: a(2) = 3: a(3) = 4
+        Results.CheckEq "4.sum_ints (array by first element)", tbf_sum_ints(a(0), 4), 10
+        Results.CheckEq "4.sum_four (fixed array parameter)", tbf_sum_four(a(0)), 10
+        Results.CheckEq "4.is_null(0)", tbf_is_null(0), 1
+        Results.CheckEq "4.is_null(VarPtr)", tbf_is_null(VarPtr(n)), 0
+        Dim pt As TBF_POINT
+        Results.CheckEq "4.fill_point returns", tbf_fill_point(pt), 0
+        Results.CheckEq "4.fill_point x,y", pt.x & "," & pt.y, "3,4"
+        Results.CheckEq "4.point_sum_or_null(pt)", tbf_point_sum_or_null(pt), 7
+        Results.CheckEq "4.point_sum_or_null(NULL) via ByVal vbNullPtr", tbf_point_sum_or_null(ByVal vbNullPtr), -1
+        Dim sp As TBF_POINT
+        Dim spAddr As LongPtr = tbf_static_point()
+        Results.Check "4.static_point non-NULL", spAddr <> 0
+        RtlMoveMemory VarPtr(sp), spAddr, LenB(sp)
+        Results.CheckEq "4.static_point x,y", sp.x & "," & sp.y, "5,6"
+    End Sub
+
+    ' ---- 5. strings ---------------------------------------------------------------------------
+    Private Sub StringChecks()
+        Dim hello As String = "h" & ChrW$(&HE9) & "llo " & ChrW$(&H2713)
+        Dim b() As Byte = ToUtf8(hello)
+        Results.CheckEq "5.utf8_len", tbf_utf8_len(VarPtr(b(0))), 10
+        Results.CheckEq "5.check_utf8", tbf_check_utf8(VarPtr(b(0))), 0
+        Results.CheckEq "5.hello_utf8", FromUtf8(tbf_hello_utf8()) = hello, True
+        Results.CheckEq "5.check_wide (StrPtr)", tbf_check_wide(StrPtr(hello)), 0
+        Results.CheckEq "5.hello_wide", FromWide(tbf_hello_wide()) = hello, True
+        Dim outText As LongPtr
+        Results.CheckEq "5.out_string returns", tbf_out_string(outText), 0
+        Results.CheckEq "5.out_string text", FromUtf8(outText), "out"
+    End Sub
+
+    ' ---- 6. opaque handles --------------------------------------------------------------------
+    Private Sub Handles()
+        Dim h As TBF_HANDLE
+        Results.CheckEq "6.handle_new returns", tbf_handle_new(h, 99), 0
+        Results.Check "6.handle_new sets the handle", h <> 0
+        Results.CheckEq "6.handle_value", tbf_handle_value(h), 99
+        tbf_handle_free h
+        tbf_handle_free 0
+        Results.Check "6.handle_free (incl. NULL) returned", True
+        Dim same As tbf_same = tbf_same_get()
+        Results.Check "6.same_get returns a handle directly (same-name opaque alias)", same <> 0
+        Results.CheckEq "6.same_check accepts that handle", tbf_same_check(same), 0
+        Results.CheckEq "6.same_check rejects NULL", tbf_same_check(vbNullPtr), 1
+        Results.CheckEq "6.calling a declared-but-not-exported function raises an error (D-031)", CallNotExported(), "raised"
+        Dim lt As tbf_late
+        lt.value = 7
+        Results.CheckEq "6.late_value (struct defined after its typedef, D-034)", tbf_late_value(lt), 7
+    End Sub
+
+    Private Function CallNotExported() As String
+        On Error GoTo failed
+        Dim ignored As Long = tbf_not_exported()
+        Return "returned " & ignored
+    failed:
+        Return "raised"
+    End Function
+
+    ' ---- 7. structs by value ------------------------------------------------------------------
+    Private Sub StructsByValue()
+        Dim s4 As TBF_S4, s8 As TBF_S8, s16 As TBF_S16, s24 As TBF_S24
+        s4.a = -3: s4.b = 4
+        s8.a = -5: s8.b = 6
+        s16.a = 7.5: s16.b = -8
+        s24.a = 9: s24.b = -10.25: s24.c = 122
+        Results.CheckEq "7.check_s4 (ByVal 4-byte struct)", tbf_check_s4(s4), 0
+        Results.CheckEq "7.check_s8 (ByVal 8-byte struct)", tbf_check_s8(s8), 0
+        Results.CheckEq "7.check_s16 (ByVal 16-byte struct)", tbf_check_s16(s16), 0
+        Results.CheckEq "7.check_s24 (ByVal 24-byte struct)", tbf_check_s24(s24), 0
+        Dim r4 As TBF_S4 = tbf_make_s4()
+        Results.CheckEq "7.make_s4 (4-byte struct return)", r4.a & "," & r4.b, "-3,4"
+        Dim r8 As TBF_S8 = tbf_make_s8()
+        Results.CheckEq "7.make_s8 (8-byte struct return)", r8.a & "," & r8.b, "-5,6"
+        Dim r16 As TBF_S16 = tbf_make_s16()
+        Results.CheckEq "7.make_s16 (16-byte struct return)", r16.a & "," & r16.b, "7.5,-8"
+        Dim r24 As TBF_S24 = tbf_make_s24()
+        Results.CheckEq "7.make_s24 (24-byte struct return)", r24.a & "," & r24.b & "," & r24.c, "9,-10.25,122"
+    End Sub
+
+    ' ---- 8. nested structs and fixed arrays ---------------------------------------------------
+    Private Sub NestedAndArrays()
+        Dim r As TBF_RECT
+        tbf_make_rect r
+        Results.CheckEq "8.make_rect tl,br", r.tl.x & "," & r.tl.y & "," & r.br.x & "," & r.br.y, "1,2,30,40"
+        Results.CheckEq "8.make_rect name", ChrW$(r.name(0)) & ChrW$(r.name(1)) & ChrW$(r.name(2)) & ChrW$(r.name(3)) & "|" & r.name(4) & r.name(7), "rect|00"
+        Results.CheckEq "8.make_rect weights", r.weights(0) & "," & r.weights(1) & "," & r.weights(2), "0.5,1.5,2.5"
+        Results.CheckEq "8.check_rect (made)", tbf_check_rect(r), 0
+        Dim q As TBF_RECT
+        q.tl.x = 1: q.tl.y = 2: q.br.x = 30: q.br.y = 40
+        q.name(0) = 114: q.name(1) = 101: q.name(2) = 99: q.name(3) = 116
+        q.weights(0) = 0.5: q.weights(1) = 1.5: q.weights(2) = 2.5
+        Results.CheckEq "8.check_rect (set in tB)", tbf_check_rect(q), 0
+    End Sub
+
+    ' ---- 9. callbacks -------------------------------------------------------------------------
+    Private Function OnVisit CDecl(ByRef point As TBF_POINT, ByVal context As LongPtr) As Long
+        mVisits += 1
+        If context <> 555 Then mBadContext += 1
+        Return point.x + point.y
+    End Function
+
+    Private Function OnVisitStd(ByVal value As Long, ByVal context As LongPtr) As Long
+        If context <> 555 Then mBadContext += 1
+        Return value * 2
+    End Function
+
+    Private Sub OnNotify CDecl(ByVal code As Long, ByVal context As LongPtr)
+        If code = 99 Then mNotified += 1
+        If context <> 555 Then mBadContext += 1
+    End Sub
+
+    Private Function OnEachPoint CDecl(ByRef point As TBF_POINT, ByVal context As LongPtr) As Long
+        mVisits += 1
+        If context <> 777 Then mBadContext += 1
+        Return If(point.x = 2, 22, 0)
+    End Function
+
+    Private Sub Callbacks()
+        Dim cb As TBF_CALLBACKS
+        cb.version = 1
+        cb.visit = AddressOf OnVisit
+        cb.visit_std = AddressOf OnVisitStd
+        cb.notify = AddressOf OnNotify
+        cb.context = 555
+        mVisits = 0: mNotified = 0: mBadContext = 0
+        Results.CheckEq "9.run_callbacks sum (cdecl visit 3+7, stdcall visit_std 14)", tbf_run_callbacks(cb), 24
+        Results.CheckEq "9.run_callbacks visit called twice", mVisits, 2
+        Results.CheckEq "9.run_callbacks notify (synthesized delegate) called", mNotified, 1
+        Results.CheckEq "9.run_callbacks context passed", mBadContext, 0
+        Dim none As TBF_CALLBACKS
+        Results.CheckEq "9.run_callbacks with NULL callbacks", tbf_run_callbacks(none), 0
+        mVisits = 0: mBadContext = 0
+        Results.CheckEq "9.foreach_point stops at first non-zero", tbf_foreach_point(AddressOf OnEachPoint, 777), 22
+        Results.CheckEq "9.foreach_point called twice", mVisits, 2
+        Results.CheckEq "9.foreach_point context passed", mBadContext, 0
+        Results.CheckEq "9.std_add (stdcall, exported decorated on x86)", tbf_std_add(2, 3), 5
+        Results.CheckEq "9.std_sub (stdcall, exported undecorated by a .def)", tbf_std_sub(5, 3), 2
+    End Sub
+
+    ' ---- 10. unions (D-018) -------------------------------------------------------------------
+    Private Sub Unions()
+        Dim t As TBF_TAGGED
+        tbf_make_tagged t, 1
+        Results.CheckEq "10.make_tagged 1 -> value.i", t.tag & "," & t.value.i, "1,42"
+        tbf_make_tagged t, 2
+        Results.CheckEq "10.make_tagged 2 -> value.d", t.tag & "," & t.value.d, "2,2.5"
+        Results.CheckEq "10.union bytes accessor (2.5 = 0x4004...)", Hex$(t.value.bytes(7)) & "," & Hex$(t.value.bytes(6)), "40,4"
+        Dim u As TBF_TAGGED
+        u.tag = 1: u.value.i = 42
+        Results.CheckEq "10.check_tagged (value.i set in tB)", tbf_check_tagged(u), 0
+        u.tag = 2: u.value.d = 2.5
+        Results.CheckEq "10.check_tagged (value.d set in tB)", tbf_check_tagged(u), 0
+        Dim a As TBF_ANON
+        tbf_make_anon a, 1
+        Results.CheckEq "10.make_anon 1 -> as_int", a.kind & "," & a.as_int, "1,77"
+        tbf_make_anon a, 2
+        Results.CheckEq "10.make_anon 2 -> as_float", a.kind & "," & a.as_float, "2,0.25"
+        Dim c As TBF_ANON
+        c.kind = 1: c.as_int = 77
+        Results.CheckEq "10.check_anon (as_int set in tB)", tbf_check_anon(c), 0
+        c.kind = 2: c.as_float = 0.25
+        Results.CheckEq "10.check_anon (as_float set in tB)", tbf_check_anon(c), 0
+    End Sub
+
+    ' ---- 11. bitfields, packing, over-alignment -----------------------------------------------
+    Private Sub BitfieldsAndPacking()
+        Dim f As TBF_FLAGS
+        tbf_make_flags f
+        Results.CheckEq "11.make_flags storage (a=1 b=5 c=9 -> 155)", f.bits_a, 155
+        Results.CheckEq "11.make_flags after", f.after, -1
+        Dim g As TBF_FLAGS
+        g.bits_a = 1 Or (5 * 2) Or (9 * 16): g.after = -1
+        Results.CheckEq "11.check_flags (set in tB)", tbf_check_flags(g), 0
+        Dim p1 As TBF_PACKED1
+        tbf_make_packed1 p1
+        Results.CheckEq "11.make_packed1", p1.c & "," & Hex$(p1.i) & "," & p1.s, "112,11223344,-2"
+        Results.CheckEq "11.check_packed1", tbf_check_packed1(p1), 0
+        Dim p2 As TBF_PACKED2
+        tbf_make_packed2 p2
+        Results.CheckEq "11.make_packed2", p2.c & "," & p2.i & "," & p2.d, "113," & -&H11223344 & ",6.5"
+        Results.CheckEq "11.check_packed2", tbf_check_packed2(p2), 0
+        Dim al As TBF_ALIGNED
+        al.x = 5
+        Results.CheckEq "11.aligned_x reads x (struct is over-aligned in C; only x is read)", tbf_aligned_x(al), 5
+    End Sub
+
+    ' ---- 12. variadic and va_list (D-006) -----------------------------------------------------
+    Private Sub Variadics()
+        Results.CheckEq "12.sum_variadic literals", tbf_sum_variadic(3, 10, 20, 30), 60
+        Dim n As Long = 5
+        Results.CheckEq "12.sum_variadic ByVal variable", tbf_sum_variadic(1, ByVal n), 5
+        Dim types() As Byte = ToUtf8("ilds")
+        Dim abc() As Byte = ToUtf8("abc")
+        Results.CheckEq "12.sum_mixed int, long long, double, char*", _
+            tbf_sum_mixed(VarPtr(types(0)), 5, 7^, 1.5, VarPtr(abc(0))), 16.5
+        Results.CheckEq "12.vsum (va_list as ByRef ParamArray)", tbf_vsum(3, 1, 2, 3), 6
+    End Sub
+
+    ' ---- 13. enums ----------------------------------------------------------------------------
+    Private Sub Enums()
+        Results.CheckEq "13.color_value(TBF_BLUE)", tbf_color_value(TBF_BLUE), 5
+        Results.CheckEq "13.color_value(TBF_RED)", tbf_color_value(TBF_RED), -1
+        Results.CheckEq "13.ret_color", tbf_ret_color(), TBF_BLUE
+        Results.CheckEq "13.check_bigflags (top bit)", tbf_check_bigflags(TBF_FLAG_LOW Or TBF_FLAG_HIGH), 0
+    End Sub
+
+    ' ---- 14. macro constants (D-021) ----------------------------------------------------------
+    Private Sub MacroConstants()
+        Results.CheckEq "14.TBF_VERSION_MAJOR", TBF_VERSION_MAJOR, 1
+        Results.CheckEq "14.TBF_HEX", TBF_HEX, 127
+        Results.CheckEq "14.TBF_OCTAL", TBF_OCTAL, 15
+        Results.CheckEq "14.TBF_UNSIGNED", TBF_UNSIGNED, 42
+        Results.CheckEq "14.TBF_LONGLONG", TBF_LONGLONG, 1234567890123^
+        Results.CheckEq "14.TBF_TOPBIT", Hex$(TBF_TOPBIT), "80000000"
+        Results.CheckEq "14.TBF_ALLBITS", TBF_ALLBITS, -1
+        Results.CheckEq "14.TBF_SHIFT", Hex$(TBF_SHIFT), "80000000"
+        Results.CheckEq "14.TBF_EXPR", TBF_EXPR, 3
+        Results.CheckEq "14.TBF_NEG", TBF_NEG, -5
+        Results.CheckEq "14.TBF_REF", TBF_REF, 127
+        Results.CheckEq "14.TBF_CHAR", TBF_CHAR, AscW(";")
+        Results.CheckEq "14.TBF_CHAR_ESC", TBF_CHAR_ESC, 10
+        Results.CheckEq "14.TBF_STRING", TBF_STRING, "tb""fixture"""
+        Results.CheckEq "14.TBF_COLOR_BLUE_NEXT", TBF_COLOR_BLUE_NEXT, 6
+        Results.CheckEq "14.TBF_COLOR_RED_ALIAS", TBF_COLOR_RED_ALIAS, TBF_RED
+        Results.CheckEq "14.TBF_FLAGS_ALL", TBF_FLAGS_ALL, TBF_FLAG_LOW Or TBF_FLAG_HIGH
+        ' D-030: values that differ by architecture (VarType: vbLong = 3, vbLongLong = 20)
+        #If Win64 Then
+            Results.CheckEq "14.TBF_ARCH_BITS (x64 value)", TBF_ARCH_BITS, 64
+            Results.CheckEq "14.TBF_SIZE_MAX (x64: LongLong, all bits)", VarType(TBF_SIZE_MAX) & ":" & TBF_SIZE_MAX, vbLongLong & ":-1"
+            Results.CheckEq "14.TBF_SIZE_MAX_ALIAS (through a reference)", VarType(TBF_SIZE_MAX_ALIAS) & ":" & TBF_SIZE_MAX_ALIAS, vbLongLong & ":-1"
+        #Else
+            Results.CheckEq "14.TBF_ARCH_BITS (x86 value)", TBF_ARCH_BITS, 32
+            Results.CheckEq "14.TBF_SIZE_MAX (x86: Long, all bits)", VarType(TBF_SIZE_MAX) & ":" & TBF_SIZE_MAX, vbLong & ":-1"
+            Results.CheckEq "14.TBF_SIZE_MAX_ALIAS (through a reference)", VarType(TBF_SIZE_MAX_ALIAS) & ":" & TBF_SIZE_MAX_ALIAS, vbLong & ":-1"
+        #End If
+        Results.CheckEq "14.TBF_SIZE_MAX as a size_t is all bits (LongPtr -1)", CLngPtr(TBF_SIZE_MAX), CLngPtr(-1)
+    End Sub
+
+    ' ---- 15. type aliases (D-025) -------------------------------------------------------------
+    Private Sub TypeAliases()
+        Results.CheckEq "15.ret_size64 (scalar typedef return)", tbf_ret_size64(), 1234567890123^
+        Dim sz As TBF_SIZED
+        sz.total = 1234567890123^
+        Results.CheckEq "15.check_sized (scalar typedef field)", tbf_check_sized(sz), 0
+        Dim pa As tbf_point_alias
+        Results.CheckEq "15.struct typedef alias passed as TBF_POINT", tbf_fill_point(pa), 0
+        Results.CheckEq "15.struct typedef alias filled", pa.x & "," & pa.y, "3,4"
+        Dim pm As TBF_POINT_MACRO_ALIAS
+        tbf_fill_point pm
+        Results.CheckEq "15.struct macro alias filled", pm.x & "," & pm.y, "3,4"
+        Dim ca As tbf_color_alias = TBF_BLUE
+        Results.CheckEq "15.enum typedef alias passed as TBF_COLOR", tbf_color_value(ca), 5
+        Dim cm As TBF_COLOR_MACRO_ALIAS = TBF_RED
+        Results.CheckEq "15.enum macro alias passed as TBF_COLOR", tbf_color_value(cm), -1
+    End Sub
+
+    ' ---- 19. memory the library allocates and the caller frees (task 19) ---------------------
+    Private Sub LibraryMemory()
+        Dim before As Long = tbf_alloc_count()
+        Dim src() As Byte = ToUtf8("h" & ChrW$(&HE9) & "llo-1")
+        Dim p As LongPtr = tbf_strdup_upper(VarPtr(src(0)))
+        Results.Check "19.strdup_upper returns a library-allocated string", p <> 0
+        Results.CheckEq "19.read through the returned pointer (UTF-8, ASCII upper-cased)", FromUtf8(p) = "H" & ChrW$(&HE9) & "LLO-1", True
+        Results.CheckEq "19.one allocation outstanding", tbf_alloc_count(), before + 1
+        tbf_free p
+        Results.CheckEq "19.tbf_free returned it", tbf_alloc_count(), before
+        tbf_free vbNullPtr
+        Results.Check "19.tbf_free(NULL) is harmless", tbf_alloc_count() = before
+        Results.Check "19.strdup_upper(NULL) is NULL", tbf_strdup_upper(vbNullPtr) = 0
+
+        Dim b As tbf_buf
+        Results.CheckEq "19.buf_fill (git_buf-shaped struct filled by the library)", tbf_buf_fill(b, 3), 0
+        Results.CheckEq "19.buf contents through ptr, size, reserved", FromUtf8(b.ptr) & "/" & b.size & "/" & b.reserved, "ababab/6/7"
+        Results.CheckEq "19.buf allocation outstanding", tbf_alloc_count(), before + 1
+        tbf_buf_dispose b
+        Results.CheckEq "19.buf_dispose freed it and zeroed the struct", b.ptr & "/" & b.size & "/" & b.reserved & "/" & tbf_alloc_count(), "0/0/0/" & before
+        tbf_buf_dispose b
+        Results.CheckEq "19.dispose of a zeroed buffer is harmless", tbf_alloc_count(), before
+        Results.CheckEq "19.buf_fill rejects a negative count", tbf_buf_fill(b, -1), -1
+    End Sub
+
+    ' ---- 18. callbacks on threads the library creates (D-045, D-046) -------------------------
+    ' Every callback here handles its own errors: an unhandled one would block on a modal
+    ' run-time error box (D-046), so that case is not exercised.
+    Private mThreadCalls As Long
+    Private mThreadTid As Long
+    Private mThreadContext As LongPtr
+    Private mThreadStrLen As Long
+    Private mThreadErr As Long
+    Private mThreadPlain As Long
+    Private mThreadAtomic As Long
+    Private mThreadCom As String
+
+    Private Function OnThreadBasic CDecl(ByVal context As LongPtr, ByVal n As Long) As Long
+        mThreadCalls += 1
+        mThreadTid = GetCurrentThreadId()
+        mThreadContext = context
+        Return n * 2 + 1
+    End Function
+
+    Private Function OnThreadWork CDecl(ByVal context As LongPtr, ByVal n As Long) As Long
+        On Error GoTo failed
+        Dim s As String = "thread " & n & " " & String$(100, "x") & ChrW$(&HE9)
+        mThreadStrLen = Len(s)
+        Dim c As New Collection
+        c.KeyCompareMode = vbBinaryCompare
+        c.Add "a", "k"
+        c.Add "b", "K"
+        Err.Raise 5, , "raised and handled inside the callback"
+        Return -1
+    failed:
+        mThreadErr = Err.Number
+        Return c.Count + If(c.Exists("k"), 10, 0)
+    End Function
+
+    Private Function OnThreadStopAt3 CDecl(ByVal context As LongPtr, ByVal n As Long) As Long
+        On Error Resume Next
+        Return If(n = 3, 33, 0)
+    End Function
+
+    Private Function OnThreadCount CDecl(ByVal context As LongPtr, ByVal n As Long) As Long
+        On Error Resume Next
+        mThreadPlain += 1
+        tbf_atomic_inc mThreadAtomic
+        Return 0
+    End Function
+
+    ' n = 0: CreateObject without COM on this thread; n = 1: CoInitializeEx first, CoUninitialize after.
+    Private Function OnThreadCom CDecl(ByVal context As LongPtr, ByVal n As Long) As Long
+        On Error Resume Next
+        Dim hr As Long
+        If n = 1 Then hr = CoInitializeEx(0, COINIT_MULTITHREADED)
+        Err.Clear
+        Dim o As Object = CreateObject("MSXML2.DOMDocument.6.0")
+        mThreadCom = If(o Is Nothing, "failed: " & Err.Number & " " & Err.Description, "created")
+        If Not o Is Nothing Then
+            If o.loadXML("<a b=""1""/>") Then mThreadCom &= " and used"
+        End If
+        Set o = Nothing
+        If n = 1 And (hr = 0 Or hr = 1) Then CoUninitialize
+        Return 0
+    End Function
+
+    Private Sub LibraryThreads()
+        Dim mainTid As Long = GetCurrentThreadId()
+        mThreadCalls = 0
+        Results.CheckEq "18.call_on_thread return value", tbf_call_on_thread(AddressOf OnThreadBasic, 4242, 20), 41
+        Results.CheckEq "18.call_on_thread context and module variable", mThreadContext & "/" & mThreadCalls, "4242/1"
+        Results.Check "18.the callback ran on the library's thread", mThreadTid <> 0 And mThreadTid <> mainTid And mThreadTid = tbf_last_thread_id(), _
+            "main " & mainTid & ", callback " & mThreadTid & ", library worker " & tbf_last_thread_id()
+        Results.CheckEq "18.String, New Collection and a handled error on the thread", tbf_call_on_thread(AddressOf OnThreadWork, 0, 7) & "/" & mThreadStrLen & "/" & mThreadErr, "12/110/5"
+        Results.CheckEq "18.foreach_on_thread: the stop value crosses threads", tbf_foreach_on_thread(AddressOf OnThreadStopAt3, 0, 10), 33
+        Results.CheckEq "18.foreach_on_thread: all zero", tbf_foreach_on_thread(AddressOf OnThreadStopAt3, 0, 2), 0
+        mThreadPlain = 0: mThreadAtomic = 0
+        Results.CheckEq "18.4 threads x 10,000 calls at once", tbf_call_on_threads(AddressOf OnThreadCount, 0, 4, 10000), 0
+        Results.CheckEq "18.shared counter via tbf_atomic_inc is exact", mThreadAtomic, 40000
+        Results.Info "18.unsynchronised counter (mThreadPlain += 1)", mThreadPlain & " of 40000" & If(mThreadPlain < 40000, " -- updates lost, as expected without synchronisation", "")
+        tbf_call_on_thread AddressOf OnThreadCom, 0, 0
+        Results.Check "18.CreateObject without COM initialised on the library thread fails", Left$(mThreadCom, 6) = "failed", mThreadCom
+        tbf_call_on_thread AddressOf OnThreadCom, 0, 1
+        Results.CheckEq "18.CreateObject after CoInitializeEx in the callback", mThreadCom, "created and used"
+    End Sub
+
+    ' ---- 17. a header the entry header does not include, generated through --also (D-033) ----
+    Private Sub ExtraHeader()
+        Results.CheckEq "17.sys_answer (declared only in tbfixture_sys.h)", tbf_sys_answer(), 42
+    End Sub
+
+    ' ---- 16. naming (renames, keywords) -------------------------------------------------------
+    Private Sub Naming()
+        Results.CheckEq "16.open returns TBF_OPEN (renamed TBF_OPEN_)", tbf_open(), TBF_OPEN_
+        Results.CheckEq "16.TBF_CLOSED_ value", TBF_CLOSED_, 2
+        Dim c As tbf_closed
+        c.code = 3
+        Results.CheckEq "16.closed_code (struct named like an enum value)", tbf_closed_code(c), 3
+        Dim k As TBF_KEYWORDS
+        tbf_make_keywords k
+        Results.CheckEq "16.make_keywords (keyword field names)", k.type & k.local & k.end & k.next & k.option & k.object & k.string & k.date, "12345678"
+        Results.CheckEq "16.check_keywords", tbf_check_keywords(k), 0
+        Results.CheckEq "16.keyword_params", tbf_keyword_params(1, 2, 3, 4, 5, 6), 0
+    End Sub
+End Module

@@ -1,0 +1,15 @@
+' One member of a generated Type (TypeMapper.FieldsOf).
+' Kind: "field"    a plain field: Name As TypeText Bounds
+'       "bitfield" storage for one or more C bitfields (Name = bits_<first>; Note lists them)
+'       "storage"  raw storage of a union (union_data) or of an anonymous union (union_N) (D-018)
+'       "accessor" a union member, emitted as Property Get/Let reading at OffsetBytes (D-018)
+Class FieldInfo
+    Public Name As String
+    Public Kind As String
+    Public TypeText As String   ' e.g. "Long /* unsigned */", "TBF_POINT", "LongPtr"
+    Public Bounds As String     ' e.g. "(0 To 7)", "(0 To 1, 0 To 2)", or ""
+    Public OffsetBytes As Long
+    Public CText As String      ' the C type, for the comment
+    Public Note As String       ' bitfield members, union members, etc.
+    Public Element As MSXML2.IXMLDOMElement    ' the CastXML Field element ("field", "accessor"), else Nothing
+End Class

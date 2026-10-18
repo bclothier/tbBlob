@@ -1,0 +1,240 @@
+' Tests for the whole pipeline and the command line (task 10.0, D-023): output folder layout
+' (report.md, Source\, Work\), stage progress, x86/x64 disagreement, determinism, and
+' (integration) real runs on tbfixture.h and libgit2.
+Module Tests_EndToEnd
+    Public Const MODULE_ID As Long = 9
+
+    Public Sub Register()
+        SelfTest.Add "pipeline: the output folder gets report.md and Source\ with the fixture's two modules", MODULE_ID, 1
+        SelfTest.Add "pipeline: report.md starts with the report title", MODULE_ID, 2
+        SelfTest.Add "pipeline: Source\ is emptied before writing", MODULE_ID, 3
+        SelfTest.Add "pipeline: an x86/x64 disagreement exits 1, names it, and writes nothing", MODULE_ID, 4
+        SelfTest.Add "pipeline: progress lines in stage order, then counts and 'read report.md first'", MODULE_ID, 5
+        SelfTest.Add "pipeline: two runs give byte-identical report.md and Source\", MODULE_ID, 6
+        SelfTest.Add "cli: a command line with a castxml that does not exist exits 4, writes no Source\ and prints the dependency checklist", MODULE_ID, 7
+        SelfTest.Add "end to end: tbBlob on tbfixture.h writes exactly report.md, Source\, Work\; the .twin files import", MODULE_ID, 8, True
+        SelfTest.Add "end to end: libgit2 gives 848 declares and the D-011 renames", MODULE_ID, 9, True
+        SelfTest.Add "pipeline: a failure while generating names the item, its header and the original error", MODULE_ID, 10
+        SelfTest.Add "end to end: --also adds the extra header's module (D-033)", MODULE_ID, 11, True
+    End Sub
+
+    Public Sub RunTest(ByVal index As Long)
+        Select Case index
+            Case 1: OutputLayout
+            Case 2: ReportFirstLine
+            Case 3: SourceEmptied
+            Case 4: DisagreementStops
+            Case 5: ProgressLines
+            Case 6: Deterministic
+            Case 7: MissingCastXml
+            Case 8: FixtureEndToEnd
+            Case 9: LibGit2EndToEnd
+            Case 10: FailureNamesItem
+            Case 11: AlsoEndToEnd
+            Case Else: Err.Raise SelfTest.CHECK_FAILED, , "no test " & index & " in Tests_EndToEnd"
+        End Select
+    End Sub
+
+    ' ---- helpers ---------------------------------------------------------------
+
+    Private Function Snap(ByVal file As String) As String
+        Return SelfTest.Fixture(file)
+    End Function
+
+    ' GenerateFrom on the fixture snapshots into outFolder; console output captured in output.
+    Private Function FromSnapshots(ByVal outFolder As String, ByRef output As String) As Long
+        Console.StartCapture
+        Dim code As Long = Pipeline.GenerateFrom(Snap("tbfixture_x86.xml"), Snap("tbfixture_x64.xml"), Snap("tbfixture_macros_x86.txt"), Snap("tbfixture_macros_x64.txt"), _
+            SelfTest.RepoRoot() & "\tests\fixture-c", "tbfixture.dll", "tbfixture", outFolder)
+        output = Console.StopCapture()
+        Return code
+    End Function
+
+    Private Function Names(ByVal folder As String) As String
+        If FileSys.KindOf(folder) <> FileSys.KIND_FOLDER Then Return "(none)"
+        Dim n() As String, c As Long, i As Long, s As String
+        c = FileSys.ListNames(folder, n)
+        If c = 0 Then Return ""
+        TextKit.SortOrdinal n, c
+        For i = 0 To c - 1
+            s &= n(i) & ";"
+        Next
+        Return s
+    End Function
+
+    Private Function RunCli(ByVal joined As String, ByRef output As String) As Long
+        Dim args() As String = Split(joined, "|")  ' Split returns a Variant; Run wants a String() ByRef
+        Console.StartCapture
+        Dim code As Long = MainModule.Run(args)
+        output = Console.StopCapture()
+        Return code
+    End Function
+
+    Private Function RepoCastXml() As String
+        Return SelfTest.RepoRoot() & "\CastXML\vcpkg_installed\x64-windows\tools\castxml\bin\castxml.exe"
+    End Function
+
+    ' ---- unit tests (snapshots, no CastXML) ------------------------------------------------
+
+    Private Sub OutputLayout()
+        Dim t As String = SelfTest.NewTempFolder()
+        Dim out As String
+        Dim code As Long = FromSnapshots(t & "\out", out)
+        Dim top As String = Names(t & "\out")
+        Dim src As String = Names(t & "\out\Source")
+        FileSys.RemovePath t
+        SelfTest.AssertEq "exit code", code, 0
+        SelfTest.AssertEq "output folder", top, "Source;report.md;"
+        SelfTest.AssertEq "Source", src, "tbfixture.twin;tbfixture_LayoutCheck.twin;tbfixture_Loader.twin;"
+    End Sub
+
+    Private Sub ReportFirstLine()
+        Dim t As String = SelfTest.NewTempFolder()
+        Dim out As String
+        FromSnapshots t & "\out", out
+        Dim report As String
+        If FileSys.KindOf(t & "\out\report.md") = FileSys.KIND_FILE Then report = FileSys.ReadTextUtf8(t & "\out\report.md")
+        FileSys.RemovePath t
+        SelfTest.AssertEq "title", Split(report, vbCrLf)(0), "# tbBlob generation report: tbfixture"
+        SelfTest.AssertTrue "functions counted", InStr(report, vbCrLf & "- functions: 89" & vbCrLf) > 0
+    End Sub
+
+    Private Sub SourceEmptied()
+        Dim t As String = SelfTest.NewTempFolder()
+        FileSys.MakeDirs t & "\out\Source"
+        FileSys.WriteTextUtf8 t & "\out\Source\stale.twin", "Module stale" & vbCrLf & "End Module" & vbCrLf
+        Dim out As String
+        FromSnapshots t & "\out", out
+        Dim src As String = Names(t & "\out\Source")
+        FileSys.RemovePath t
+        SelfTest.AssertEq "stale module gone", src, "tbfixture.twin;tbfixture_LayoutCheck.twin;tbfixture_Loader.twin;"
+    End Sub
+
+    Private Sub DisagreementStops()
+        Dim t As String = SelfTest.NewTempFolder()
+        FileSys.WriteTextUtf8 t & "\macros.txt", ""
+        Console.StartCapture
+        Dim code As Long = Pipeline.GenerateFrom(SelfTest.RepoRoot() & "\tests\testdata\typemap\disagree_x86.xml", _
+            SelfTest.RepoRoot() & "\tests\testdata\typemap\disagree_x64.xml", t & "\macros.txt", t & "\macros.txt", "C:\lib\include", "s.dll", "s", t & "\out")
+        Dim out As String = Console.StopCapture()
+        Dim written As String = Names(t & "\out")
+        FileSys.RemovePath t
+        SelfTest.AssertEq "exit code", code, MainModule.EXIT_FAILED
+        SelfTest.AssertTrue "names the disagreement", InStr(Pipeline.LastError, "S.v") > 0, "LastError=[" & Pipeline.LastError & "]"
+        SelfTest.AssertTrue "says it on the console", InStr(out, "S.v") > 0, out
+        SelfTest.AssertTrue "nothing written", written = "(none)" Or written = "", "written=[" & written & "]"
+    End Sub
+
+    Private Sub ProgressLines()
+        Dim t As String = SelfTest.NewTempFolder()
+        Dim out As String
+        FromSnapshots t & "\out", out
+        Dim reportPath As String = FileSys.FullPath(t & "\out") & "\report.md"
+        FileSys.RemovePath t
+        ' naming needs the macros (constants take part in collision resolution), so macros come first
+        Dim stages As Variant = Array("loading CastXML output", "checking x86/x64", "reading macros", "mapping names", "generating", "writing")
+        Dim i As Long, at As Long, prev As Long
+        For i = 0 To UBound(stages)
+            at = InStr(out, stages(i))
+            SelfTest.AssertTrue "stage '" & stages(i) & "' after the previous one", at > prev, out
+            prev = at
+        Next
+        SelfTest.AssertTrue "summary counts", InStr(out, "89 functions") > 0, out
+        SelfTest.AssertTrue "points at the report", InStr(out, "read " & reportPath & " first") > 0, out
+    End Sub
+
+    Private Sub Deterministic()
+        Dim t As String = SelfTest.NewTempFolder()
+        Dim out As String
+        FromSnapshots t & "\a", out
+        FromSnapshots t & "\b", out
+        Dim same As Boolean = True
+        Dim f As Variant
+        For Each f In Array("report.md", "Source\tbfixture.twin", "Source\tbfixture_LayoutCheck.twin", "Source\tbfixture_Loader.twin")
+            If FileSys.KindOf(t & "\a\" & f) <> FileSys.KIND_FILE Then same = False
+            If same Then same = (FileSys.ReadTextUtf8(t & "\a\" & f) = FileSys.ReadTextUtf8(t & "\b\" & f))
+        Next
+        FileSys.RemovePath t
+        SelfTest.AssertTrue "identical", same
+    End Sub
+
+    Private Sub MissingCastXml()
+        Dim t As String = SelfTest.NewTempFolder()
+        Dim out As String
+        Dim code As Long = RunCli(SelfTest.RepoRoot() & "\tests\fixture-c|tbfixture.h|tbfixture.dll|" & t & "\out|--castxml|C:\no-such\castxml.exe", out)
+        Dim src As String = Names(t & "\out\Source")
+        FileSys.RemovePath t
+        SelfTest.AssertEq "exit code", code, MainModule.EXIT_TOOL_NOT_FOUND
+        SelfTest.AssertTrue "says castxml.exe not found", InStr(out, "castxml.exe not found") > 0, out
+        SelfTest.AssertEq "no Source", src, "(none)"
+        SelfTest.AssertTrue "then prints the whole checklist, as --check does (D-035)", _
+            InStr(out, "MISSING  castxml.exe") > 0 And InStr(out, "MSXML 6") > 0 And InStr(out, "1 missing, 4 not checked because of them") > 0, out
+    End Sub
+
+    ' ---- integration (real CastXML; tBImportExport as a test-only check) ----------------------
+
+    Private Sub FixtureEndToEnd()
+        Dim t As String = SelfTest.NewTempFolder()
+        Dim out As String
+        Dim code As Long = RunCli(SelfTest.RepoRoot() & "\tests\fixture-c|tbfixture.h|tbfixture.dll|" & t & "\out|--castxml|" & RepoCastXml(), out)
+        Dim top As String = Names(t & "\out")
+        Dim src As String = Names(t & "\out\Source")
+        Dim work As String = Names(t & "\out\Work")
+        Dim importCode As Long = -1
+        If code = 0 Then importCode = TestProjects.PackAndImport(t & "\out\Source", "tbfixture", t & "\proj", t & "\tbfixture.twinproj")
+        Dim importOutput As String = Tools.LastToolOutput
+        FileSys.RemovePath t
+        SelfTest.AssertEq "exit code", code, 0
+        SelfTest.AssertEq "output folder", top, "Source;Work;report.md;"
+        SelfTest.AssertEq "Source", src, "tbfixture.twin;tbfixture_LayoutCheck.twin;tbfixture_Loader.twin;"
+        SelfTest.AssertEq "Work", work, "castxml_macros_x64.cmd;castxml_macros_x86.cmd;castxml_x64.cmd;castxml_x64.xml;castxml_x86.cmd;castxml_x86.xml;macros_x64.txt;macros_x86.txt;"
+        SelfTest.AssertEq "the .twin files import (test-only check)", importCode, 0
+    End Sub
+
+    Private Sub AlsoEndToEnd()
+        Dim t As String = SelfTest.NewTempFolder()
+        Dim out As String
+        Dim code As Long = RunCli(SelfTest.RepoRoot() & "\tests\fixture-c|tbfixture.h|tbfixture.dll|" & t & "\out|--castxml|" & RepoCastXml() & "|--also|tbfixture_sys.h", out)
+        Dim src As String = Names(t & "\out\Source")
+        Dim work As String = Names(t & "\out\Work")
+        Dim sys As String
+        If FileSys.KindOf(t & "\out\Source\tbfixture_sys.twin") = FileSys.KIND_FILE Then sys = FileSys.ReadTextUtf8(t & "\out\Source\tbfixture_sys.twin")
+        FileSys.RemovePath t
+        SelfTest.AssertEq "exit code", code, 0
+        SelfTest.AssertEq "Source", src, "tbfixture.twin;tbfixture_LayoutCheck.twin;tbfixture_Loader.twin;tbfixture_sys.twin;"
+        SelfTest.AssertTrue "Work holds the generated entry file", InStr(work, "tbblob_entry.h;") > 0, work
+        SelfTest.AssertTrue "the extra header's function", InStr(sys, "Public DeclareWide PtrSafe Function tbf_sys_answer CDecl Lib ""tbfixture.dll"" () As Long") > 0, Left$(sys, 300)
+    End Sub
+
+    Private Sub FailureNamesItem()
+        Dim t As String = SelfTest.NewTempFolder()
+        Dim out As String
+        Pipeline.TestFailOn = "tbf_visit_cb"
+        Dim code As Long = FromSnapshots(t & "\out", out)
+        Pipeline.TestFailOn = ""
+        FileSys.RemovePath t
+        SelfTest.AssertEq "exit code", code, MainModule.EXIT_FAILED
+        SelfTest.AssertTrue "names the item", InStr(Pipeline.LastError, "delegate tbf_visit_cb") > 0, "LastError=[" & Pipeline.LastError & "]"
+        SelfTest.AssertTrue "names its header and line", InStr(Pipeline.LastError, "tbfixture.h:") > 0, "LastError=[" & Pipeline.LastError & "]"
+        SelfTest.AssertTrue "keeps the original error", InStr(Pipeline.LastError, "forced failure (test hook)") > 0, "LastError=[" & Pipeline.LastError & "]"
+        SelfTest.AssertTrue "on the console too", InStr(out, "delegate tbf_visit_cb") > 0, out
+    End Sub
+
+    Private Sub LibGit2EndToEnd()
+        Dim t As String = SelfTest.NewTempFolder()
+        Dim out As String
+        Dim started As Double = Timer
+        Dim code As Long = RunCli(SelfTest.RepoRoot() & "\libgit2\vcpkg_installed\x64-windows\include|git2.h|git2.dll|" & t & "\out|--castxml|" & RepoCastXml(), out)
+        SelfTest.Info "libgit2 end to end in " & Format$(Timer - started, "0.0") & " s"
+        Dim report As String
+        If FileSys.KindOf(t & "\out\report.md") = FileSys.KIND_FILE Then report = FileSys.ReadTextUtf8(t & "\out\report.md")
+        Dim modules As Long = UBound(Split(Names(t & "\out\Source"), ";"))
+        FileSys.RemovePath t
+        SelfTest.AssertTrue "exit code 0", code = 0, "exit " & code & "; tbBlob said: " & Replace(out, vbLf, " / ")
+        SelfTest.AssertTrue "848 declares", InStr(report, vbCrLf & "- functions: 848" & vbCrLf) > 0, Left$(report, 400)
+        SelfTest.AssertTrue "GIT_ERROR renamed, git_error kept", InStr(report, "- enumvalue GIT_ERROR -> GIT_ERROR_ (collides with type git_error)") > 0
+        SelfTest.AssertTrue "GIT_REPOSITORY_OPEN_BARE renamed", InStr(report, "- enumvalue GIT_REPOSITORY_OPEN_BARE -> GIT_REPOSITORY_OPEN_BARE_") > 0
+        SelfTest.AssertTrue "no x86/x64 disagreements", InStr(report, "## x86/x64 disagreements" & vbCrLf & "- none") > 0
+        SelfTest.AssertTrue "one module per header plus layout check", modules > 50, "modules=" & modules
+    End Sub
+End Module

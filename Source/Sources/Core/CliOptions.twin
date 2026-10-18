@@ -1,0 +1,67 @@
+' What the command line asked for. Filled by CliOptions.Parse.
+Class CliOptions
+    Public HeaderFolder As String
+    Public EntryHeader As String
+    Public DllName As String
+    Public OutputFolder As String   ' D-023: tbBlob writes report.md, Source\ and Work\ here
+    Public ProjectName As String
+    Public CastXmlPath As String
+    Public X86DllPath As String     ' --x86-dll: the built x86 DLL, read for its export names (D-026)
+    Public IncludeDirs As New Collection
+    Public Defines As New Collection
+    Public AlsoHeaders As New Collection    ' --also: extra entry headers, relative to the header folder (D-033)
+    Public SelfTest As Boolean
+    Public Integration As Boolean
+    Public Help As Boolean
+    Public Check As Boolean         ' --check: report every dependency and exit (D-035)
+
+    ' Fills this object from args (program name excluded). Returns "" when the command line is
+    ' well formed, else what is wrong with it. Does not touch the disk.
+    Public Function Parse(args() As String) As String
+        Dim positional As New Collection
+        Dim i As Long, a As String
+        i = LBound(args)
+        Do While i <= UBound(args)
+            a = args(i)
+            Select Case a
+                Case "--self-test"
+                    Me.SelfTest = True
+                Case "--integration"
+                    Me.Integration = True
+                Case "--help", "-h"
+                    Me.Help = True
+                Case "--check"
+                    Me.Check = True
+                Case "--name", "-I", "-D", "--castxml", "--x86-dll", "--also"
+                    If i = UBound(args) Then Return "option " & a & " needs a value"
+                    i += 1
+                    Select Case a
+                        Case "--name": ProjectName = args(i)
+                        Case "-I": IncludeDirs.Add args(i)
+                        Case "-D": Defines.Add args(i)
+                        Case "--castxml": CastXmlPath = args(i)
+                        Case "--x86-dll": X86DllPath = args(i)
+                        Case "--also": AlsoHeaders.Add args(i)
+                    End Select
+                Case Else
+                    If Len(a) > 1 And Left$(a, 1) = "-" Then Return "unknown option: " & a
+                    positional.Add a
+            End Select
+            i += 1
+        Loop
+
+        If Me.Help Or Me.SelfTest Or Me.Check Then Return ""
+        If positional.Count <> 4 Then
+            Return "expects 4 arguments: <header folder> <entry header> <dll name> <output folder> (got " & positional.Count & ")"
+        End If
+        HeaderFolder = positional(1)
+        EntryHeader = positional(2)
+        DllName = positional(3)
+        OutputFolder = positional(4)
+        If Len(ProjectName) = 0 Then
+            ProjectName = FileSys.BaseName(DllName)
+            If InStrRev(ProjectName, ".") > 1 Then ProjectName = Left$(ProjectName, InStrRev(ProjectName, ".") - 1)
+        End If
+        Return ""
+    End Function
+End Class

@@ -1,0 +1,6 @@
+' An opaque alias tbBlob emits at file scope: Public Alias <Name> As LongPtr (D-008).
+Class AliasInfo
+    Public Name As String       ' the C name: the struct's own name, or a typedef name for it
+    Public StructName As String ' the incomplete struct it stands for
+    Public Element As MSXML2.IXMLDOMElement    ' the Struct or Typedef element (gives the header, for the module)
+End Class

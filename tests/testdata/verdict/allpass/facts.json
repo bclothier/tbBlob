@@ -1,0 +1,11 @@
+{
+  "compile": { "win32": { "exists": true, "fresh": true }, "win64": { "exists": true, "fresh": true } },
+  "results": {
+    "libgit2": { "win32": { "path": "libgit2-win32.txt", "fresh": true }, "win64": { "path": "libgit2-win64.txt", "fresh": true } },
+    "fixture": { "win32": { "path": "fixture-win32.txt", "fresh": true }, "win64": { "path": "fixture-win64.txt", "fresh": true } }
+  },
+  "reports": { "libgit2": "report-libgit2.md", "fixture": "report-fixture.md" },
+  "coverage": { "exports": 953, "generated": 960, "exceptions": [ { "name": "git_config_unlock", "reason": "not declared in any public header" } ], "notExported": [ "git_x" ] },
+  "docs": { "commented": 1200, "documented": 1200, "missing": [] },
+  "regenerated": { "identical": true, "differing": [] }
+}

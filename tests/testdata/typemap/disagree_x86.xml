@@ -1,0 +1,12 @@
+<?xml version="1.0"?>
+<!-- A struct whose field is int on x86 and long long on x64 (as an #ifdef _WIN64 header would give). -->
+<CastXML format="1.4.0">
+  <Namespace id="_1" name="::" members="_2 _3"/>
+  <Struct id="_2" name="S" context="_1" location="f1:1" file="f1" line="1" members="_10" size="32" align="32"/>
+  <Function id="_3" name="f" returns="_20" context="_1" location="f1:5" file="f1" line="5">
+    <Argument name="a" type="_20" location="f1:5" file="f1" line="5"/>
+  </Function>
+  <Field id="_10" name="v" type="_20" context="_2" access="public" location="f1:2" file="f1" line="2" offset="0"/>
+  <FundamentalType id="_20" name="int" size="32" align="32"/>
+  <File id="f1" name="C:/lib/include/s.h"/>
+</CastXML>

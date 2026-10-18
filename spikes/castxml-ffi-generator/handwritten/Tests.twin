@@ -1,0 +1,283 @@
+' SPIKE throwaway: runtime probes for SPIKE-2..9. Uses only the generated bindings for libgit2.
+Module Tests
+    Private Const LOAD_WITH_ALTERED_SEARCH_PATH As Long = &H8
+    Private Const VCVARS64 As String = "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+    Private Const CASTXML As String = "C:\GitHub\tbBlob\CastXML\vcpkg_installed\x64-windows\tools\castxml\bin\castxml.exe"
+
+    Private Declare PtrSafe Function LoadLibraryExW Lib "kernel32" (ByVal lpLibFileName As LongPtr, ByVal hFile As LongPtr, ByVal dwFlags As Long) As LongPtr
+    Private Declare PtrSafe Function GetModuleFileNameW Lib "kernel32" (ByVal hModule As LongPtr, ByVal lpFilename As LongPtr, ByVal nSize As Long) As Long
+    Private Declare PtrSafe Sub Sleep Lib "kernel32" (ByVal dwMilliseconds As Long)
+    ' Hand-written variadic declare against the C runtime, to test Double/LongLong/LongPtr marshalling.
+    Private Declare PtrSafe Function c_snprintf CDecl Lib "msvcrt" Alias "_snprintf" (ByVal buf As LongPtr, ByVal count As LongPtr, ByVal fmt As LongPtr, ByVal ParamArray args As Any()) As Long
+
+    ' SPIKE-5: top-bit constants written as signed bit patterns.
+    Private Const TOPBIT_LONG As Long = &H80000000
+    Private Const ALLBITS_LONG As Long = &HFFFFFFFF
+    Private Enum TopBitEnum
+        TB_HIGH = &H80000000
+        TB_LOW = 1
+    End Enum
+
+    Private CheckoutCalls As Long
+    Private CheckoutLastTotal As LongPtr
+    Private CheckoutLastPath As String
+    Private CheckoutPayload As LongPtr
+    Private TransferCalls As Long
+    Private TransferTotal As Long
+    Private TransferReceived As Long
+    Private TransferPayload As LongPtr
+    Private RefNames As String
+    Private RefPayload As LongPtr
+    Private DllLoaded As Boolean
+
+    Public Sub RunAll()
+        Spike9_Process
+        Spike8_LoadDll
+        If Not DllLoaded Then
+            Results.Fail "8.skip", "git2.dll not loaded; libgit2 probes skipped"
+            Exit Sub
+        End If
+        Spike3_Basics
+        Spike6_Variadic
+        Spike_CloneGroup
+        Results.Info "9.shutdown", "git_libgit2_shutdown=" & git_libgit2_shutdown()
+    End Sub
+
+    ' ---- SPIKE-8: DLL loading ------------------------------------------------
+    Private Sub Spike8_LoadDll()
+        On Error GoTo EH
+        Dim path As String = SPIKE_DIR & "\bin\" & Results.Arch() & "\git2.dll"
+        Dim h As LongPtr = LoadLibraryExW(StrPtr(path), 0, LOAD_WITH_ALTERED_SEARCH_PATH)
+        Results.Check "8.loadlibrary", h <> 0, path & " err=" & Err.LastDllError
+        If h = 0 Then Exit Sub
+        Dim buf As String = String$(520, vbNullChar)
+        Dim n As Long = GetModuleFileNameW(h, StrPtr(buf), 520)
+        Results.Info "8.module", Left$(buf, n)
+        Dim initCount As Long = git_libgit2_init()
+        Results.Check "8.lib_binds_to_preloaded", initCount >= 1, "git_libgit2_init=" & initCount
+        DllLoaded = initCount >= 1
+        Exit Sub
+EH:
+        Results.Fail "8.error", Err.Number & " " & Err.Description
+    End Sub
+
+    ' ---- SPIKE-3: pointer rules, error struct via CType ----------------------
+    Private Sub Spike3_Basics()
+        On Error GoTo EH
+        Dim major As Long, minor As Long, rev As Long
+        Dim rc As Long = git_libgit2_version(major, minor, rev)
+        Results.CheckEq "3.scalar_ptr_byref.version", major & "." & minor & "." & rev, "1.9.1"
+
+        Dim repo As git_repository
+        Dim bad() As Byte = Utf8.ToUtf8(SPIKE_DIR & "\no-such-repo")
+        rc = git_repository_open(repo, VarPtr(bad(0)))
+        Results.Check "3.open_missing_fails", rc < 0, "rc=" & rc
+        Dim pErr As LongPtr = git_error_last()
+        Results.Check "3.error_last_nonnull", pErr <> 0, "ptr=" & pErr
+        If pErr <> 0 Then
+            With CType(Of git_error_)(pErr)
+                Results.Check "3.ctype_error_message", Len(Utf8.FromUtf8(.message)) > 0, "klass=" & .klass & " message=" & Utf8.FromUtf8(.message)
+            End With
+        End If
+        Exit Sub
+EH:
+        Results.Fail "3.error", Err.Number & " " & Err.Description
+    End Sub
+
+    ' ---- SPIKE-6: variadics ----------------------------------------------------
+    Private Sub Spike6_Variadic()
+        On Error GoTo EH
+        Dim want As LongPtr = 12345678
+        Dim rc As Long = git_libgit2_opts(GIT_OPT_SET_MWINDOW_SIZE, ByVal want)
+        Results.CheckEq "6.opts_set_rc", rc, 0
+        Dim got As LongPtr
+        rc = git_libgit2_opts(GIT_OPT_GET_MWINDOW_SIZE, got)
+        Results.CheckEq "6.opts_get_rc", rc, 0
+        Results.CheckEq "6.opts_roundtrip_sizet", got, want
+
+        Results.CheckEq "6.snprintf_long", Fmt("%d", CLng(-5)), "-5"
+        Results.CheckEq "6.snprintf_longlong", Fmt("%I64d", CLngLng(1234567890123)), "1234567890123"
+        Results.CheckEq "6.snprintf_double", Fmt("%.3f", CDbl(3.25)), "3.250"
+        Results.CheckEq "6.snprintf_longptr", Fmt("%Iu", CLngPtr(987654)), "987654"
+        Dim s() As Byte = Utf8.ToUtf8("abc")
+        Results.CheckEq "6.snprintf_charptr", Fmt("%s", VarPtr(s(0))), "abc"
+
+        Dim buf(255) As Byte
+        Dim f() As Byte = Utf8.ToUtf8("%d|%I64d|%.3f|%s|%Iu")
+        c_snprintf VarPtr(buf(0)), 255, VarPtr(f(0)), CLng(-5), CLngLng(1234567890123), CDbl(3.25), VarPtr(s(0)), CLngPtr(987654)
+        Results.CheckEq "6.snprintf_mixed", Utf8.FromUtf8(VarPtr(buf(0))), "-5|1234567890123|3.250|abc|987654"
+
+        ' #671: a plain variable in the variadic part goes by address
+        Dim n As Long = 7
+        Dim fu() As Byte = Utf8.ToUtf8("%Iu")
+        c_snprintf VarPtr(buf(0)), 255, VarPtr(fu(0)), n
+        Results.CheckEq "6.plain_var_is_address", Utf8.FromUtf8(VarPtr(buf(0))), CStr(VarPtr(n))
+        c_snprintf VarPtr(buf(0)), 255, VarPtr(fu(0)), ByVal n
+        Results.CheckEq "6.byval_var_is_value", Utf8.FromUtf8(VarPtr(buf(0))), "7"
+        c_snprintf VarPtr(buf(0)), 255, VarPtr(fu(0)), (n)
+        Results.CheckEq "6.paren_var_is_value", Utf8.FromUtf8(VarPtr(buf(0))), "7"
+        Exit Sub
+EH:
+        Results.Fail "6.error", Err.Number & " " & Err.Description
+    End Sub
+
+    Private Function Fmt(ByVal format As String, ByVal value As Variant) As String
+        ' value arrives as a Variant; pass a typed copy as an expression so it goes by value
+        Dim buf(255) As Byte
+        Dim f() As Byte = Utf8.ToUtf8(format)
+        Select Case VarType(value)
+            Case vbLong: c_snprintf VarPtr(buf(0)), 255, VarPtr(f(0)), CLng(value)
+            Case vbLongLong: c_snprintf VarPtr(buf(0)), 255, VarPtr(f(0)), CLngLng(value)
+            Case vbDouble: c_snprintf VarPtr(buf(0)), 255, VarPtr(f(0)), CDbl(value)
+            Case Else: Return "unsupported vartype " & VarType(value)
+        End Select
+        Return Utf8.FromUtf8(VarPtr(buf(0)))
+    End Function
+
+    ' ---- SPIKE-2/4/5/7: clone with callbacks, strings, scalars, naming ---------
+    Private Sub Spike_CloneGroup()
+        On Error GoTo EH
+        Dim parent As String = Environ$("TEMP") & "\tbBlob-spike-" & ChrW(&HE9)
+        If Len(Dir$(parent, vbDirectory)) = 0 Then MkDir parent
+        Dim target As String = parent & "\clone-" & Results.Arch() & "-" & Format$(Now, "yyyymmddhhnnss")
+        Dim url As String = "file:///" & Replace(SPIKE_DIR & "\fixture\repo", "\", "/")
+        Dim urlB() As Byte = Utf8.ToUtf8(url)
+        Dim pathB() As Byte = Utf8.ToUtf8(target)
+
+        Dim opts As git_clone_options
+        Dim rc As Long = git_clone_options_init(opts, 1)
+        Results.CheckEq "3.struct_ptr_byref.options_init", rc, 0
+        Results.CheckEq "3.options_init_wrote_version", opts.version, 1
+        opts.checkout_opts.progress_cb = AddressOf OnCheckoutProgress
+        opts.checkout_opts.progress_payload = 1111
+        opts.fetch_opts.callbacks.transfer_progress = AddressOf OnTransferProgress
+        opts.fetch_opts.callbacks.payload = 2222
+        opts.local = GIT_CLONE_NO_LOCAL
+
+        Dim repo As git_repository
+        rc = git_clone(repo, VarPtr(urlB(0)), VarPtr(pathB(0)), opts)
+        Results.Check "2.clone_rc", rc = 0, "rc=" & rc & " url=" & url & IIf(rc <> 0, " err=" & LastError(), "")
+        If rc <> 0 Then Exit Sub
+        Results.Check "2.checkout_cb_called", CheckoutCalls > 0, "calls=" & CheckoutCalls & " lastTotal=" & CheckoutLastTotal & " lastPath=" & CheckoutLastPath
+        Results.CheckEq "2.checkout_cb_total_steps", CheckoutLastTotal, 2
+        Results.CheckEq "2.checkout_cb_payload", CheckoutPayload, 1111
+        Results.Check "2.transfer_cb_called", TransferCalls > 0, "calls=" & TransferCalls & " received=" & TransferReceived & " total=" & TransferTotal
+        Results.Check "2.transfer_cb_complete", TransferTotal > 0 And TransferReceived = TransferTotal, "received=" & TransferReceived & " total=" & TransferTotal
+        Results.CheckEq "2.transfer_cb_payload", TransferPayload, 2222
+        Results.Check "4.callback_charptr", CheckoutLastPath = "a.txt" Or CheckoutLastPath = "b.txt", "lastPath=" & CheckoutLastPath
+
+        ' SPIKE-4: non-ASCII path round trip
+        Dim gotPath As String = Utf8.FromUtf8(git_repository_path(repo))
+        Results.Check "4.utf8_path_roundtrip", InStr(1, Replace(gotPath, "/", "\"), target, vbTextCompare) = 1, "git_repository_path=" & gotPath
+
+        ' SPIKE-2b: delegate as declare parameter
+        rc = git_reference_foreach_name(repo, AddressOf OnRefName, 3333)
+        Results.CheckEq "2.foreach_rc", rc, 0
+        Results.Check "2.foreach_cb_names", InStr(RefNames, "refs/heads/main;") > 0 And InStr(RefNames, "refs/tags/v1;") > 0, RefNames
+        Results.CheckEq "2.foreach_cb_payload", RefPayload, 3333
+
+        ' SPIKE-3/5: opaque alias interchange, returned struct pointer, LongLong
+        Dim obj As git_object
+        Dim spec() As Byte = Utf8.ToUtf8("HEAD")
+        rc = git_revparse_single(obj, repo, VarPtr(spec(0)))
+        Results.CheckEq "3.opaque_out_byref.revparse", rc, 0
+        Dim pSig As LongPtr = git_commit_author(obj)   ' git_object passed where git_commit is declared
+        Results.Check "3.alias_interchange.author_ptr", pSig <> 0, "ptr=" & pSig
+        If pSig <> 0 Then
+            With CType(Of git_signature)(pSig)
+                Results.CheckEq "4.utf8_author_name", Utf8.FromUtf8(.name), "Zo" & ChrW(&HEB) & " T" & ChrW(&HEB) & "ster"
+                Results.CheckEq "4.author_email", Utf8.FromUtf8(.email), "zoe@example.com"
+                Results.CheckEq "5.git_time.time_longlong", .when.time, CLngLng(1700000000)
+                Results.CheckEq "5.git_time.offset", .when.offset, 90
+                Results.CheckEq "5.git_time.sign", .when.sign, 43
+            End With
+        End If
+        Results.CheckEq "5.return_longlong.commit_time", git_commit_time(obj), CLngLng(1700000000)
+        Results.CheckEq "5.commit_time_offset", git_commit_time_offset(obj), 90
+        Dim ev As git_clone_local_t
+        Results.CheckEq "5.enum_size", LenB(ev), 4
+        Results.CheckEq "5.topbit_long", TOPBIT_LONG, -2147483648#
+        Results.CheckEq "5.allbits_long", ALLBITS_LONG, -1
+        Results.CheckEq "5.topbit_enum", CLng(TB_HIGH), -2147483648#
+        git_object_free obj
+
+        ' SPIKE-3: NULL for a ByRef UDT parameter (default clone options)
+        Dim repo2 As git_repository
+        Dim pathB2() As Byte = Utf8.ToUtf8(target & "-nullopts")
+        rc = git_clone(repo2, VarPtr(urlB(0)), VarPtr(pathB2(0)), ByVal vbNullPtr)
+        Results.Check "3.vbnullptr_for_byref_udt", rc = 0, "rc=" & rc & IIf(rc <> 0, " err=" & LastError(), "")
+        If rc = 0 Then git_repository_free repo2
+
+        ' SPIKE-7: renamed function with Alias
+        Dim bare As git_repository
+        Dim bareB() As Byte = Utf8.ToUtf8(SPIKE_DIR & "\fixture\repo.git")
+        rc = git_repository_open_bare_(bare, VarPtr(bareB(0)))
+        Results.Check "7.alias_renamed_declare", rc = 0, "rc=" & rc & IIf(rc <> 0, " err=" & LastError(), "")
+        If rc = 0 Then
+            Results.CheckEq "7.alias_is_bare", git_repository_is_bare(bare), 1
+            git_repository_free bare
+        End If
+        Results.CheckEq "7.enum_value_kept", CLng(GIT_REPOSITORY_OPEN_BARE), 4
+
+        git_repository_free repo
+        Exit Sub
+EH:
+        Results.Fail "2.error", Err.Number & " " & Err.Description
+    End Sub
+
+    Private Function LastError() As String
+        Dim p As LongPtr = git_error_last()
+        If p = 0 Then Return "(none)"
+        With CType(Of git_error_)(p)
+            Return .klass & ": " & Utf8.FromUtf8(.message)
+        End With
+    End Function
+
+    Private Sub OnCheckoutProgress CDecl(ByVal path As LongPtr, ByVal completed_steps As LongPtr, ByVal total_steps As LongPtr, ByVal payload As LongPtr)
+        CheckoutCalls += 1
+        CheckoutLastTotal = total_steps
+        CheckoutPayload = payload
+        If path <> 0 Then CheckoutLastPath = Utf8.FromUtf8(path)
+    End Sub
+
+    Private Function OnTransferProgress CDecl(ByRef stats As git_indexer_progress, ByVal payload As LongPtr) As Long
+        TransferCalls += 1
+        TransferTotal = stats.total_objects
+        TransferReceived = stats.received_objects
+        TransferPayload = payload
+        Return 0
+    End Function
+
+    Private Function OnRefName CDecl(ByVal name As LongPtr, ByVal payload As LongPtr) As Long
+        RefNames &= Utf8.FromUtf8(name) & ";"
+        RefPayload = payload
+        Return 0
+    End Function
+
+    ' ---- SPIKE-9: external process --------------------------------------------
+    Private Sub Spike9_Process()
+        On Error GoTo EH
+        Dim q As String = Chr$(34)
+        Dim cmd As String = "cmd /c " & q & q & VCVARS64 & q & " >nul 2>nul && " & q & CASTXML & q & " --version" & q
+        Dim code As Long
+        Dim out As String = RunCapture(cmd, code)
+        Results.Check "9.castxml_stdout", InStr(out, "castxml version") > 0, "out=" & Left$(Replace(out, vbCrLf, " / "), 120)
+        Results.CheckEq "9.castxml_exitcode", code, 0
+        out = RunCapture("cmd /c exit 3", code)
+        Results.CheckEq "9.nonzero_exitcode", code, 3
+        Exit Sub
+EH:
+        Results.Fail "9.error", Err.Number & " " & Err.Description
+    End Sub
+
+    Private Function RunCapture(ByVal commandLine As String, ByRef exitCode As Long) As String
+        Dim sh As Object = CreateObject("WScript.Shell")
+        Dim ex As Object = sh.Exec(commandLine)
+        Dim out As String = ex.StdOut.ReadAll()
+        Do While ex.Status = 0
+            Sleep 20
+        Loop
+        exitCode = ex.ExitCode
+        Return out
+    End Function
+End Module

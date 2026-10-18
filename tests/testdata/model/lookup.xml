@@ -1,0 +1,13 @@
+<?xml version="1.0"?>
+<!-- Hand-written CastXML-shaped input for the lookup index tests (task 16.0): the same name under two tags, and one tag+name twice. -->
+<CastXML format="1.4.0">
+  <Namespace id="_1" name="::" members="_2 _3 _4 _5 _6"/>
+  <Struct id="_2" name="dup" context="_1" location="f1:1" file="f1" line="1" incomplete="1"/>
+  <Typedef id="_3" name="dup" type="_2" context="_1" location="f1:2" file="f1" line="2"/>
+  <Typedef id="_4" name="twice" type="_20" context="_1" location="f1:3" file="f1" line="3"/>
+  <Typedef id="_5" name="twice" type="_21" context="_1" location="f1:4" file="f1" line="4"/>
+  <Function id="_6" name="dup_fn" returns="_20" context="_1" location="f1:5" file="f1" line="5"/>
+  <FundamentalType id="_20" name="int" size="32" align="32"/>
+  <FundamentalType id="_21" name="long" size="32" align="32"/>
+  <File id="f1" name="C:/lib/include/lookup.h"/>
+</CastXML>

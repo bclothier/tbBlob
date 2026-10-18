@@ -1,0 +1,11 @@
+' The value of one macro (MacroTable.Evaluate).
+' Kind: "integer", "double", "string", "typealias" (StrValue = the type, D-025), "skipped" (Reason says why).
+Class MacroValue
+    Public Kind As String
+    Public IntValue As LongLong     ' integer: the value as C computes it (unsigned values keep their bits)
+    Public Bits As Long             ' integer: 32 or 64
+    Public IsUnsigned As Boolean
+    Public DblValue As Double
+    Public StrValue As String
+    Public Reason As String
+End Class

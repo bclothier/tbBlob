@@ -1,0 +1,158 @@
+' Tests for NameTable and Naming (task 6.0): the D-011 collision rule, Alias for renamed
+' functions, opaque aliases per typedef name (D-008), module names.
+Module Tests_Naming
+    Public Const MODULE_ID As Long = 5
+
+    Public Sub Register()
+        SelfTest.Add "naming: an enum value colliding with a type is renamed; the type keeps its name", MODULE_ID, 1
+        SelfTest.Add "naming: an enum value colliding with a function is renamed; no Alias needed", MODULE_ID, 2
+        SelfTest.Add "naming: a function colliding with a type is renamed and keeps its export via Alias", MODULE_ID, 3
+        SelfTest.Add "naming: three-way collisions rename by kind rank, each name unique", MODULE_ID, 4
+        SelfTest.Add "naming: a rename skips names already taken", MODULE_ID, 5
+        SelfTest.Add "naming: the same name and kind added twice is one name, not a collision", MODULE_ID, 6
+        SelfTest.Add "naming: results do not depend on the order names were added", MODULE_ID, 7
+        SelfTest.Add "naming: every rename is logged with what it collided with", MODULE_ID, 8
+        SelfTest.Add "naming: opaque aliases for struct names and differing typedef names", MODULE_ID, 9
+        SelfTest.Add "naming: module names from header paths avoid reserved words and taken names", MODULE_ID, 10
+        SelfTest.Add "naming: the fixture's collisions resolve as D-011 says", MODULE_ID, 11
+        SelfTest.Add "naming: keyword-named fields need no escaping (D-007)", MODULE_ID, 12
+    End Sub
+
+    Public Sub RunTest(ByVal index As Long)
+        Select Case index
+            Case 1: EnumValueVsType
+            Case 2: EnumValueVsFunction
+            Case 3: FunctionVsType
+            Case 4: ThreeWay
+            Case 5: SkipsTakenNames
+            Case 6: DuplicateIsNotCollision
+            Case 7: OrderIndependent
+            Case 8: RenameLogged
+            Case 9: OpaqueAliasesFound
+            Case 10: ModuleNames
+            Case 11: FixtureCollisions
+            Case 12: NoEscaping
+            Case Else: Err.Raise SelfTest.CHECK_FAILED, , "no test " & index & " in Tests_Naming"
+        End Select
+    End Sub
+
+    ' ---- helpers ---------------------------------------------------------------
+
+    ' entries: "name:kind|name:kind|..."; returns the resolved table.
+    Private Function Table(ByVal entries As String) As NameTable
+        Dim t As New NameTable, e As Variant, parts() As String
+        For Each e In Split(entries, "|")
+            parts = Split(e, ":")
+            t.Add parts(0), parts(1)
+        Next
+        t.Resolve
+        Return t
+    End Function
+
+    Private Function FixtureMapper() As TypeMapper
+        Dim m As New CxModel
+        m.Load SelfTest.Fixture("tbfixture_x64.xml"), SelfTest.RepoRoot() & "\tests\fixture-c"
+        Dim map As New TypeMapper
+        map.Init m
+        Return map
+    End Function
+
+    ' ---- tests -----------------------------------------------------------------------
+
+    Private Sub EnumValueVsType()
+        Dim t As NameTable = Table("git_error:type|GIT_ERROR:enumvalue")
+        SelfTest.AssertEq "type kept", t.TbName("git_error", "type"), "git_error"
+        SelfTest.AssertEq "enum value renamed", t.TbName("GIT_ERROR", "enumvalue"), "GIT_ERROR_"
+    End Sub
+
+    Private Sub EnumValueVsFunction()
+        Dim t As NameTable = Table("git_repository_open_bare:function|GIT_REPOSITORY_OPEN_BARE:enumvalue")
+        SelfTest.AssertEq "function kept", t.TbName("git_repository_open_bare", "function"), "git_repository_open_bare"
+        SelfTest.AssertEq "no Alias", t.FunctionAlias("git_repository_open_bare"), ""
+        SelfTest.AssertEq "enum value renamed", t.TbName("GIT_REPOSITORY_OPEN_BARE", "enumvalue"), "GIT_REPOSITORY_OPEN_BARE_"
+    End Sub
+
+    Private Sub FunctionVsType()
+        Dim t As NameTable = Table("foo:function|Foo:type")
+        SelfTest.AssertEq "type kept", t.TbName("Foo", "type"), "Foo"
+        SelfTest.AssertEq "function renamed", t.TbName("foo", "function"), "foo_"
+        SelfTest.AssertEq "Alias keeps the export", t.FunctionAlias("foo"), "foo"
+    End Sub
+
+    Private Sub ThreeWay()
+        Dim t As NameTable = Table("ABC:enumvalue|abc:type|Abc:const")
+        SelfTest.AssertEq "type kept", t.TbName("abc", "type"), "abc"
+        SelfTest.AssertEq "const next", t.TbName("Abc", "const"), "Abc_"
+        SelfTest.AssertEq "enum value last", t.TbName("ABC", "enumvalue"), "ABC__"
+    End Sub
+
+    Private Sub SkipsTakenNames()
+        Dim t As NameTable = Table("x:type|X:enumvalue|x_:type")
+        SelfTest.AssertEq "x kept", t.TbName("x", "type"), "x"
+        SelfTest.AssertEq "x_ kept", t.TbName("x_", "type"), "x_"
+        SelfTest.AssertEq "X skips x_", t.TbName("X", "enumvalue"), "X__"
+        SelfTest.AssertTrue "taken (any case)", t.IsTaken("X__") And t.IsTaken("x") And Not t.IsTaken("y")
+    End Sub
+
+    Private Sub DuplicateIsNotCollision()
+        Dim t As NameTable = Table("git_attr_value_t:type|git_attr_value_t:type")
+        SelfTest.AssertEq "unchanged", t.TbName("git_attr_value_t", "type"), "git_attr_value_t"
+        SelfTest.AssertEq "no renames", t.RenameLog().Count, 0
+    End Sub
+
+    Private Sub OrderIndependent()
+        Dim a As NameTable = Table("ABC:enumvalue|abc:type|Abc:const|foo:function|Foo:type")
+        Dim b As NameTable = Table("Foo:type|Abc:const|foo:function|abc:type|ABC:enumvalue")
+        SelfTest.AssertEq "ABC", a.TbName("ABC", "enumvalue"), b.TbName("ABC", "enumvalue")
+        SelfTest.AssertEq "Abc", a.TbName("Abc", "const"), b.TbName("Abc", "const")
+        SelfTest.AssertEq "foo", a.TbName("foo", "function"), b.TbName("foo", "function")
+    End Sub
+
+    Private Sub RenameLogged()
+        Dim t As NameTable = Table("git_error:type|GIT_ERROR:enumvalue")
+        SelfTest.AssertEq "one rename", t.RenameLog().Count, 1
+        SelfTest.AssertEq "line", t.RenameLog()(1), "enumvalue GIT_ERROR -> GIT_ERROR_ (collides with type git_error)"
+    End Sub
+
+    Private Sub OpaqueAliasesFound()
+        Dim map As TypeMapper = FixtureMapper()
+        Dim a As AliasInfo, names As String
+        For Each a In Naming.OpaqueAliases(map.Model)
+            names &= a.Name & "=" & a.StructName & ";"
+        Next
+        SelfTest.AssertTrue "struct name", InStr(names, "tbf_handle_impl=tbf_handle_impl;") > 0, names
+        SelfTest.AssertTrue "differing typedef name", InStr(names, "TBF_HANDLE=tbf_handle_impl;") > 0, names
+        SelfTest.AssertTrue "same-name typedef: one alias (D-031)", InStr(names, "tbf_same=tbf_same;") > 0, names
+        SelfTest.AssertEq "no CRT opaque structs", UBound(Split(names, ";")), 3
+    End Sub
+
+    Private Sub ModuleNames()
+        Dim t As NameTable = Table("lib_point:type")
+        SelfTest.AssertEq "subfolder", Naming.ModuleName("C:\lib\include\git2\repository.h", "C:\lib\include", t), "git2_repository"
+        SelfTest.AssertEq "slashes and case", Naming.ModuleName("c:/LIB/include/git2/sys/odb backend.h", "C:\lib\include\", t), "git2_sys_odb_backend"
+        SelfTest.AssertEq "reserved word", Naming.ModuleName("C:\lib\include\object.h", "C:\lib\include", t), "object_h"
+        SelfTest.AssertEq "taken name", Naming.ModuleName("C:\lib\include\lib_point.h", "C:\lib\include", t), "lib_point_h"
+        SelfTest.AssertEq "plain", Naming.ModuleName("C:\lib\include\tbfixture.h", "C:\lib\include", t), "tbfixture"
+    End Sub
+
+    Private Sub FixtureCollisions()
+        Dim map As TypeMapper = FixtureMapper()
+        Dim t As New NameTable
+        Naming.RegisterLibrary map, t
+        SelfTest.AssertEq "TBF_OPEN vs tbf_open", t.TbName("TBF_OPEN", "enumvalue"), "TBF_OPEN_"
+        SelfTest.AssertEq "tbf_open kept", t.TbName("tbf_open", "function"), "tbf_open"
+        SelfTest.AssertEq "TBF_CLOSED vs tbf_closed", t.TbName("TBF_CLOSED", "enumvalue"), "TBF_CLOSED_"
+        SelfTest.AssertEq "tbf_closed kept", t.TbName("tbf_closed", "type"), "tbf_closed"
+        SelfTest.AssertEq "synthesized delegate registered", t.TbName("TBF_CALLBACKS_notify_cb", "delegate"), "TBF_CALLBACKS_notify_cb"
+        SelfTest.AssertEq "opaque alias registered", t.TbName("TBF_HANDLE", "type"), "TBF_HANDLE"
+        SelfTest.AssertEq "unrelated enum value", t.TbName("TBF_BLUE", "enumvalue"), "TBF_BLUE"
+        SelfTest.AssertEq "renames", t.RenameLog().Count, 2
+    End Sub
+
+    Private Sub NoEscaping()
+        Dim t As New NameTable
+        SelfTest.AssertTrue "type", Not t.NeedsEscape("type")
+        SelfTest.AssertTrue "object", Not t.NeedsEscape("object")
+        SelfTest.AssertTrue "option", Not t.NeedsEscape("option")
+    End Sub
+End Module

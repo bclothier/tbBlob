@@ -1,0 +1,40 @@
+' String and memory helpers for passing const char* / const wchar_t* as LongPtr.
+Module Utf8
+    Private Const CP_UTF8 As Long = 65001
+    Private Declare PtrSafe Function WideCharToMultiByte Lib "kernel32" (ByVal CodePage As Long, ByVal dwFlags As Long, ByVal lpWideCharStr As LongPtr, ByVal cchWideChar As Long, ByVal lpMultiByteStr As LongPtr, ByVal cbMultiByte As Long, ByVal lpDefaultChar As LongPtr, ByVal lpUsedDefaultChar As LongPtr) As Long
+    Private Declare PtrSafe Function MultiByteToWideChar Lib "kernel32" (ByVal CodePage As Long, ByVal dwFlags As Long, ByVal lpMultiByteStr As LongPtr, ByVal cbMultiByte As Long, ByVal lpWideCharStr As LongPtr, ByVal cchWideChar As Long) As Long
+    Private Declare PtrSafe Function lstrlenA Lib "kernel32" (ByVal lpString As LongPtr) As Long
+    Private Declare PtrSafe Function lstrlenW Lib "kernel32" (ByVal lpString As LongPtr) As Long
+    Public Declare PtrSafe Sub RtlMoveMemory Lib "kernel32" (ByVal Destination As LongPtr, ByVal Source As LongPtr, ByVal Length As LongPtr)
+
+    ' NUL-terminated UTF-8 bytes. Pass VarPtr(result(0)) where C wants const char*.
+    Public Function ToUtf8(ByVal s As String) As Byte()
+        Dim b() As Byte
+        If Len(s) = 0 Then
+            ReDim b(0)
+            Return b
+        End If
+        Dim n As Long = WideCharToMultiByte(CP_UTF8, 0, StrPtr(s), Len(s), 0, 0, 0, 0)
+        ReDim b(n)
+        WideCharToMultiByte CP_UTF8, 0, StrPtr(s), Len(s), VarPtr(b(0)), n, 0, 0
+        Return b
+    End Function
+
+    Public Function FromUtf8(ByVal p As LongPtr) As String
+        If p = 0 Then Return vbNullString
+        Dim n As Long = lstrlenA(p)
+        If n = 0 Then Return ""
+        Dim chars As Long = MultiByteToWideChar(CP_UTF8, 0, p, n, 0, 0)
+        Dim s As String = String$(chars, vbNullChar)
+        MultiByteToWideChar CP_UTF8, 0, p, n, StrPtr(s), chars
+        Return s
+    End Function
+
+    Public Function FromWide(ByVal p As LongPtr) As String
+        If p = 0 Then Return vbNullString
+        Dim n As Long = lstrlenW(p)
+        Dim s As String = String$(n, vbNullChar)
+        If n > 0 Then RtlMoveMemory StrPtr(s), p, n * 2
+        Return s
+    End Function
+End Module

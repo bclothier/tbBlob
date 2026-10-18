@@ -1,0 +1,131 @@
+' SPIKE-10 throwaway: does a tB CDecl callback work when C calls it from a thread C created?
+' Run Build\threadprobe_<arch>.exe for the normal checks (results-<arch>.txt), then
+' Build\threadprobe_<arch>.exe risky for the unhandled-error check (results-<arch>-risky.txt).
+Module Probe
+    Private Declare PtrSafe Function LoadLibraryExW Lib "kernel32" (ByVal lpLibFileName As LongPtr, ByVal hFile As LongPtr, ByVal dwFlags As Long) As LongPtr
+    Private Declare PtrSafe Function GetCurrentThreadId Lib "kernel32" () As Long
+
+    Public Delegate Function tp_cb CDecl (ByVal context As LongPtr, ByVal n As Long) As Long
+    Private Declare PtrSafe Function tp_call_on_thread CDecl Lib "threadprobe.dll" (ByVal cb As tp_cb, ByVal context As LongPtr, ByVal n As Long) As Long
+    Private Declare PtrSafe Function tp_call_on_threads CDecl Lib "threadprobe.dll" (ByVal cb As tp_cb, ByVal context As LongPtr, ByVal threads As Long, ByVal calls As Long) As Long
+    Private Declare PtrSafe Function tp_last_thread_id CDecl Lib "threadprobe.dll" () As Long
+    Private Declare PtrSafe Function tp_atomic_inc CDecl Lib "threadprobe.dll" (ByRef value As Long) As Long
+
+    Private mCalls As Long
+    Private mCbThread As Long
+    Private mContext As LongPtr
+    Private mStrLen As Long
+    Private mErrSeen As Long
+    Private mPlain As Long
+    Private mAtomic As Long
+    Private mCreateErr As String
+
+    Public Sub Main()
+        Dim risky As Boolean = InStr(1, Command$, "risky", vbTextCompare) > 0
+        Results.Start(If(risky, "-risky", ""))
+        Dim p As LongPtr
+        Results.Info "0.arch", Results.Arch() & " LenB(LongPtr)=" & LenB(p) & " main thread " & GetCurrentThreadId()
+        Dim dll As String = Results.HarnessDir() & "\bin\" & Results.Arch() & "\threadprobe.dll"
+        Results.Check "0.load", LoadLibraryExW(StrPtr(dll), 0, 8) <> 0, dll
+        If risky Then
+            RunRisky
+        Else
+            RunNormal
+        End If
+        Results.Info "0.summary", "passed=" & Results.Passed & " failed=" & Results.Failed
+    End Sub
+
+    ' ---- callbacks (run on threads threadprobe.dll creates) ----------------------------------
+    Private Function OnBasic CDecl(ByVal context As LongPtr, ByVal n As Long) As Long
+        mCalls += 1
+        mCbThread = GetCurrentThreadId()
+        mContext = context
+        Return n * 2 + 1
+    End Function
+
+    Private Function OnString CDecl(ByVal context As LongPtr, ByVal n As Long) As Long
+        Dim s As String = "thread " & n & " " & String$(100, "x") & ChrW$(&HE9)
+        mStrLen = Len(s)
+        Return Len(s)
+    End Function
+
+    Private Function OnCollection CDecl(ByVal context As LongPtr, ByVal n As Long) As Long
+        Dim c As New Collection
+        c.KeyCompareMode = vbBinaryCompare
+        c.Add "a", "k"
+        c.Add "b", "K"
+        Return c.Count + If(c.Exists("k"), 10, 0)
+    End Function
+
+    Private Function OnLocalError CDecl(ByVal context As LongPtr, ByVal n As Long) As Long
+        On Error GoTo handled
+        Err.Raise 5, , "raised inside the callback"
+        Return 0
+    handled:
+        mErrSeen = Err.Number
+        Return 77
+    End Function
+
+    Private Function OnCount CDecl(ByVal context As LongPtr, ByVal n As Long) As Long
+        mPlain += 1
+        tp_atomic_inc mAtomic
+        Return 0
+    End Function
+
+    Private Function OnCreateObject CDecl(ByVal context As LongPtr, ByVal n As Long) As Long
+        On Error Resume Next
+        Dim o As Object = CreateObject("Scripting.Dictionary")
+        mCreateErr = Err.Number & If(Err.Number <> 0, " " & Err.Description, "")
+        If Not o Is Nothing Then
+            o.Add "k", 1
+            If o.Exists("k") Then mCreateErr &= " (object used)"
+        End If
+        Return 0
+    End Function
+
+    Private Function OnUnhandled CDecl(ByVal context As LongPtr, ByVal n As Long) As Long
+        Err.Raise 5, , "unhandled, inside a callback on a foreign thread"
+        Return 99
+    End Function
+
+    ' ---- checks -------------------------------------------------------------------------------
+    Private Sub RunNormal()
+        Dim mainTid As Long = GetCurrentThreadId()
+        Dim r As Long = tp_call_on_thread(AddressOf OnBasic, 4242, 20)
+        Results.CheckEq "10.basic return value (n*2+1)", r, 41
+        Results.CheckEq "10.basic module variable written on the thread", mCalls, 1
+        Results.CheckEq "10.basic context passed", mContext, 4242
+        Results.Check "10.basic ran on another OS thread", mCbThread <> 0 And mCbThread <> mainTid And mCbThread = tp_last_thread_id(), "main " & mainTid & ", callback " & mCbThread & ", C worker " & tp_last_thread_id()
+
+        r = tp_call_on_thread(AddressOf OnString, 0, 7)
+        Results.CheckEq "10.string built on the thread", r & "/" & mStrLen, "110/110"
+
+        r = tp_call_on_thread(AddressOf OnCollection, 0, 0)
+        Results.CheckEq "10.New Collection on the thread (2 items, key ""k"" found)", r, 12
+
+        r = tp_call_on_thread(AddressOf OnLocalError, 0, 0)
+        Results.CheckEq "10.error handled inside the callback", r & "/" & mErrSeen, "77/5"
+
+        mPlain = 0: mAtomic = 0
+        r = tp_call_on_threads(AddressOf OnCount, 0, 4, 10000)
+        Results.CheckEq "10.concurrent: threads created", r, 0
+        Results.CheckEq "10.concurrent: atomic counter exact (4 x 10,000)", mAtomic, 40000
+        Results.Info "10.concurrent: plain += counter", mPlain & " of 40000" & If(mPlain < 40000, " (lost updates: unsynchronized)", " (no loss observed this run)")
+
+        r = tp_call_on_thread(AddressOf OnCreateObject, 0, 0)
+        Results.Info "10.CreateObject(""Scripting.Dictionary"") on the thread", "Err " & mCreateErr
+
+        ' the same callbacks still work from the main thread afterwards
+        Results.CheckEq "10.main thread still fine after", OnBasic(0, 1), 3
+    End Sub
+
+    Private Sub RunRisky()
+        Results.Info "10r.before", "calling a callback that raises an unhandled error on a foreign thread"
+        On Error GoTo caught
+        Dim r As Long = tp_call_on_thread(AddressOf OnUnhandled, 0, 0)
+        Results.Info "10r.after", "tp_call_on_thread returned " & r & "; Err " & Err.Number & " " & Err.Description
+        Exit Sub
+    caught:
+        Results.Info "10r.caught", "the error reached Main: " & Err.Number & " " & Err.Description
+    End Sub
+End Module

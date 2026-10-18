@@ -1,0 +1,9 @@
+' One parameter of a generated Declare or Delegate (TypeMapper.ParamsOf).
+Class ParamInfo
+    Public Name As String       ' the C name, or argN when unnamed
+    Public Passing As String    ' "ByVal" or "ByRef"
+    Public TypeText As String
+    Public IsVaList As Boolean  ' a C va_list: emitted as ByRef ParamArray args As Any() (D-006)
+    Public IsStructByValue As Boolean
+    Public CText As String
+End Class

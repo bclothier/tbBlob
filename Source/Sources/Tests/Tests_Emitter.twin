@@ -1,0 +1,504 @@
+' Tests for Emitter (task 9.0; packaging helpers are test-only since D-023): the emitted tB text for every tbfixture construct
+' (exact lines), determinism, the layout-check module, the report, Settings, and (integration)
+' writing + importing the project with the import tool.
+Module Tests_Emitter
+    Public Const MODULE_ID As Long = 8
+
+    Public Sub Register()
+        SelfTest.Add "emit: a module per header with a generated-file header and Module/End Module", MODULE_ID, 1
+        SelfTest.Add "emit: opaque aliases at file scope, for struct and typedef names", MODULE_ID, 2
+        SelfTest.Add "emit: constants with their C #define as a comment; skipped macros absent", MODULE_ID, 3
+        SelfTest.Add "emit: enums with values, trailing comments, renamed and top-bit values", MODULE_ID, 4
+        SelfTest.Add "emit: delegates with CDecl or stdcall, recovered parameter names", MODULE_ID, 5
+        SelfTest.Add "emit: a Type with trailing doc comments and the C type of each field", MODULE_ID, 6
+        SelfTest.Add "emit: doc comments copied verbatim as /* */ blocks", MODULE_ID, 7
+        SelfTest.Add "emit: packing attribute; over-alignment noted", MODULE_ID, 8
+        SelfTest.Add "emit: unions and anonymous unions as storage with Property accessors", MODULE_ID, 9
+        SelfTest.Add "emit: bitfield storage", MODULE_ID, 10
+        SelfTest.Add "emit: declares (Function/Sub, CDecl/stdcall, no-parameter form)", MODULE_ID, 11
+        SelfTest.Add "emit: variadic and va_list parameters as ParamArray", MODULE_ID, 12
+        SelfTest.Add "emit: keyword parameter names and struct-by-value notes", MODULE_ID, 13
+        SelfTest.Add "emit: output is identical when generated twice", MODULE_ID, 14
+        SelfTest.Add "emit: the layout-check module has expected sizes/offsets per architecture", MODULE_ID, 15
+        SelfTest.Add "emit: the report lists counts, renames, skips, losses, by-value structs, packing", MODULE_ID, 16
+        SelfTest.Add "emit: Settings and a deterministic project GUID", MODULE_ID, 17
+        SelfTest.Add "emit: the project folder imports with the import tool and exports back unchanged", MODULE_ID, 18, True
+        SelfTest.Add "emit: a typedef of a callback typedef becomes its own delegate with the same parameters", MODULE_ID, 19
+        SelfTest.Add "emit: type aliases (typedefs and macros) as file-scope Public Alias; signatures use them (D-025)", MODULE_ID, 20
+        SelfTest.Add "emit: the layout module answers TbLayout(record, member) with tB's actual size/offset (PRD req. 42)", MODULE_ID, 21
+        SelfTest.Add "emit: x86 stdcall binds to _name@N under #If Win64 only when the DLL exports that (D-026)", MODULE_ID, 22
+        SelfTest.Add "emit: x86 stdcall export not checked / not exported is reported (D-026)", MODULE_ID, 23
+        SelfTest.Add "pe: export names of the built tbfixture DLLs, x86 and x64 (D-026)", MODULE_ID, 24, True
+        SelfTest.Add "pe: a file that is not a DLL fails naming the file", MODULE_ID, 25
+        SelfTest.Add "emit: the optional loader module: Load(folder) with arch subfolder, LoadFile, IsLoaded (D-027)", MODULE_ID, 26
+        SelfTest.Add "emit: the report explains loading the DLL (D-027)", MODULE_ID, 27
+        SelfTest.Add "emit: constants that differ by architecture become #If Win64 pairs; x86-only ones are skipped (D-030)", MODULE_ID, 28
+        SelfTest.Add "emit: an opaque alias declared with its struct's name keeps the typedef's doc comment (D-031)", MODULE_ID, 29
+        SelfTest.Add "emit: with --x86-dll, a declared function the DLL does not export gets a NOTE and a report entry (D-031)", MODULE_ID, 30
+        SelfTest.Add "emit: a struct defined without a doc comment takes its same-name typedef's doc (D-034)", MODULE_ID, 31
+    End Sub
+
+    Public Sub RunTest(ByVal index As Long)
+        Select Case index
+            Case 1: ModuleShape
+            Case 2: OpaqueAliases
+            Case 3: Constants
+            Case 4: Enums
+            Case 5: Delegates
+            Case 6: PlainType
+            Case 7: VerbatimDocs
+            Case 8: Packing
+            Case 9: Unions
+            Case 10: Bitfields
+            Case 11: Declares
+            Case 12: Variadics
+            Case 13: KeywordsAndByValue
+            Case 14: Deterministic
+            Case 15: LayoutModule
+            Case 16: Report
+            Case 17: SettingsAndGuid
+            Case 18: WriteAndImport
+            Case 19: DelegateAlias
+            Case 20: TypeAliases
+            Case 21: TbLayoutFunction
+            Case 22: StdcallBinding
+            Case 23: StdcallReported
+            Case 24: PeExportNames
+            Case 25: PeNotADll
+            Case 26: LoaderModule
+            Case 27: LoadingReport
+            Case 28: ArchConstants
+            Case 29: SameNameAliasDoc
+            Case 30: NotExported
+            Case 31: LateStructDoc
+            Case Else: Err.Raise SelfTest.CHECK_FAILED, , "no test " & index & " in Tests_Emitter"
+        End Select
+    End Sub
+
+    ' ---- helpers ---------------------------------------------------------------
+
+    Private Function Built(Optional ByVal x86Exports As Collection = Nothing) As Emitter
+        Dim root As String = SelfTest.RepoRoot()
+        Dim headers As String = root & "\tests\fixture-c"
+        Dim m64 As New CxModel
+        m64.Load SelfTest.Fixture("tbfixture_x64.xml"), headers
+        Dim m86 As New CxModel
+        m86.Load SelfTest.Fixture("tbfixture_x86.xml"), headers
+        Dim t64 As New TypeMapper
+        t64.Init m64
+        Dim t86 As New TypeMapper
+        t86.Init m86
+        Dim macros As New MacroTable
+        macros.ParseDump FileSys.ReadTextUtf8(root & "\tests\testdata\fixture\tbfixture_macros_x64.txt")
+        macros.ScanLibrary headers
+        Dim macros86 As New MacroTable
+        macros86.ParseDump FileSys.ReadTextUtf8(root & "\tests\testdata\fixture\tbfixture_macros_x86.txt")
+        macros86.ScanLibrary headers
+        Dim e As New Emitter
+        e.Init t64, t86, macros, "tbfixture.dll", headers, "tbfixture"
+        e.UseX86Macros macros86
+        Set e.X86Exports = x86Exports
+        e.Generate
+        Return e
+    End Function
+
+    Private Function Text() As String
+        Return Built().ModuleText("tbfixture")
+    End Function
+
+    ' The text contains this exact line (or consecutive lines joined with vbCrLf).
+    Private Sub HasLine(ByVal text As String, ByVal what As String, ByVal lineText As String)
+        SelfTest.AssertTrue what, InStr(text, vbCrLf & lineText & vbCrLf) > 0, "missing line(s): [" & Replace(lineText, vbCrLf, " \n ") & "]"
+    End Sub
+
+    ' ---- tests -----------------------------------------------------------------------
+
+    Private Sub ModuleShape()
+        Dim e As Emitter = Built()
+        Dim names As Collection = e.ModuleNames()
+        SelfTest.AssertEq "one module", names.Count, 1
+        SelfTest.AssertEq "named after the header", names(1), "tbfixture"
+        Dim t As String = e.ModuleText("tbfixture")
+        SelfTest.AssertEq "first line", Split(t, vbCrLf)(0), "' GENERATED by tbBlob from tbfixture.h -- do not edit; regenerate instead."
+        HasLine t, "Module line", "Module tbfixture"
+        SelfTest.AssertEq "ends", Right$(t, Len("End Module" & vbCrLf)), "End Module" & vbCrLf
+        SelfTest.AssertTrue "CRLF only", InStr(Replace(t, vbCrLf, ""), vbLf) = 0
+    End Sub
+
+    Private Sub OpaqueAliases()
+        Dim t As String = Text()
+        Dim moduleAt As Long = InStr(t, vbCrLf & "Module tbfixture" & vbCrLf)
+        SelfTest.AssertTrue "struct-name alias before Module", InStr(t, vbCrLf & "Public Alias tbf_handle_impl As LongPtr" & vbCrLf) < moduleAt And InStr(t, "Public Alias tbf_handle_impl As LongPtr") > 0
+        SelfTest.AssertTrue "typedef-name alias before Module", InStr(t, vbCrLf & "Public Alias TBF_HANDLE As LongPtr" & vbCrLf) < moduleAt And InStr(t, "Public Alias TBF_HANDLE As LongPtr") > 0
+        HasLine t, "typedef C comment", "' C: typedef struct tbf_handle_impl TBF_HANDLE (opaque)"
+    End Sub
+
+    Private Sub Constants()
+        Dim t As String = Text()
+        HasLine t, "top bit", "    Public Const TBF_TOPBIT As Long = &H80000000  ' C: #define TBF_TOPBIT 0x80000000u"
+        HasLine t, "64-bit", "    Public Const TBF_LONGLONG As LongLong = 1234567890123^  ' C: #define TBF_LONGLONG 1234567890123LL"
+        HasLine t, "string", "    Public Const TBF_STRING As String = ""tb""""fixture""""""  ' C: #define TBF_STRING ""tb\""fixture\"""""
+        HasLine t, "enum reference", "    Public Const TBF_COLOR_BLUE_NEXT As Long = 6  ' C: #define TBF_COLOR_BLUE_NEXT (TBF_BLUE + 1)"
+        SelfTest.AssertTrue "initializer not emitted", InStr(t, "Const TBF_INIT ") = 0
+        SelfTest.AssertTrue "function-like not emitted", InStr(t, "Const TBF_TWICE ") = 0
+    End Sub
+
+    Private Sub Enums()
+        Dim t As String = Text()
+        HasLine t, "enum block", "    ' C: enum TBF_COLOR" & vbCrLf & "    Public Enum TBF_COLOR" & vbCrLf & _
+            "        TBF_RED = -1  ' negative value" & vbCrLf & "        TBF_GREEN = 0  ' plain trailing comment" & vbCrLf & _
+            "        TBF_BLUE = 5" & vbCrLf & "    End Enum"
+        HasLine t, "renamed value", "        TBF_OPEN_ = 1"
+        HasLine t, "top-bit value", "        TBF_FLAG_HIGH = &H80000000"
+    End Sub
+
+    Private Sub Delegates()
+        Dim t As String = Text()
+        HasLine t, "cdecl delegate", "    Public Delegate Function tbf_visit_cb CDecl ( _" & vbCrLf & _
+            "        ByRef point As TBF_POINT, _" & vbCrLf & "        ByVal context As LongPtr _" & vbCrLf & "    ) As Long"
+        HasLine t, "stdcall delegate has no keyword", "    Public Delegate Function tbf_visit_std_cb ( _" & vbCrLf & _
+            "        ByVal value As Long, _" & vbCrLf & "        ByVal context As LongPtr _" & vbCrLf & "    ) As Long"
+        HasLine t, "synthesized delegate (Sub)", "    Public Delegate Sub TBF_CALLBACKS_notify_cb CDecl ( _" & vbCrLf & _
+            "        ByVal code As Long, _" & vbCrLf & "        ByVal context As LongPtr _" & vbCrLf & "    )"
+        HasLine t, "unnamed parameters", "    Public Delegate Sub tbf_unnamed_cb CDecl ( _" & vbCrLf & _
+            "        ByVal arg1 As Long, _" & vbCrLf & "        ByVal arg2 As LongPtr _" & vbCrLf & "    )"
+        HasLine t, "C comment", "    ' C: tbf_visit_cb = int (*)(const TBF_POINT *, void *)"
+    End Sub
+
+    Private Sub PlainType()
+        Dim t As String = Text()
+        HasLine t, "TBF_POINT", "    ' C: struct TBF_POINT (8 bytes on x86, 8 on x64)" & vbCrLf & "    Public Type TBF_POINT" & vbCrLf & _
+            "        x As Long /**< horizontal */  ' C: int" & vbCrLf & "        y As Long /**< vertical */  ' C: int" & vbCrLf & "    End Type"
+        HasLine t, "array field", "        name(0 To 7) As Byte  ' C: char[8]"
+        HasLine t, "delegate field (C type is the typedef)", "        visit As tbf_visit_cb  ' C: tbf_visit_cb"
+        HasLine t, "unsigned field", "        version As Long /* unsigned */  ' C: unsigned int"
+    End Sub
+
+    Private Sub VerbatimDocs()
+        Dim t As String = Text()
+        HasLine t, "one-line doc before a declare", "    /** Checks each argument against the known values of TBF_SCALARS, in field order. */"
+        HasLine t, "multi-line doc", "    /**" & vbCrLf & "     * Field names that are twinBASIC keywords. Known values: 1, 2, 3, ... in field order." & vbCrLf & _
+            "     * A doc line ending in an underscore looks like a tB line continuation: some_name_" & vbCrLf & "     */"
+        HasLine t, "non-ASCII doc", "    /** A static UTF-8 string: ""h" & ChrW(&HE9) & "llo " & ChrW(&H2713) & """ (e-acute, check mark). */"
+    End Sub
+
+    Private Sub Packing()
+        Dim t As String = Text()
+        HasLine t, "pack(1)", "    [PackingAlignment(1)]" & vbCrLf & "    Public Type TBF_PACKED1"
+        HasLine t, "pack(2)", "    [PackingAlignment(2)]" & vbCrLf & "    Public Type TBF_PACKED2"
+        HasLine t, "over-aligned note", "    ' NOTE: over-aligned (__declspec(align)): tB cannot express this alignment; the layout check skips it."
+    End Sub
+
+    Private Sub Unions()
+        Dim t As String = Text()
+        HasLine t, "storage", "        union_data(0 To 0) As LongLong  ' union of: i, d, bytes"
+        HasLine t, "copy helper", "        Private Declare PtrSafe Sub RtlMoveMemory Lib ""kernel32"" (ByVal Destination As LongPtr, ByVal Source As LongPtr, ByVal Length As LongPtr)"
+        HasLine t, "scalar accessor", "        Public Property Get i() As Long" & vbCrLf & "            Dim v As Long" & vbCrLf & _
+            "            RtlMoveMemory VarPtr(v), VarPtr(Me.union_data(0)) + 0, LenB(v)" & vbCrLf & "            Return v" & vbCrLf & _
+            "        End Property" & vbCrLf & "        Public Property Let i(ByVal v As Long)" & vbCrLf & _
+            "            RtlMoveMemory VarPtr(Me.union_data(0)) + 0, VarPtr(v), LenB(v)" & vbCrLf & "        End Property"
+        HasLine t, "array accessor", "        Public Property Get bytes(ByVal index As Long) As Byte"
+        HasLine t, "array accessor offset", "            RtlMoveMemory VarPtr(v), VarPtr(Me.union_data(0)) + 0 + index * LenB(v), LenB(v)"
+        HasLine t, "union field in a struct", "        value As TBF_VALUE  ' C: TBF_VALUE"
+        HasLine t, "anonymous storage", "        union_1(0 To 0) As Long  ' union of: as_int, as_float"
+        HasLine t, "anonymous accessor", "        Public Property Get as_float() As Single"
+    End Sub
+
+    Private Sub Bitfields()
+        HasLine Text(), "storage", "        bits_a As Long /* unsigned */  ' bitfields a:1 b:3 c:4"
+    End Sub
+
+    Private Sub Declares()
+        Dim t As String = Text()
+        HasLine t, "function", "    ' C: int tbf_inc_int(int * value)" & vbCrLf & _
+            "    Public DeclareWide PtrSafe Function tbf_inc_int CDecl Lib ""tbfixture.dll"" ( _" & vbCrLf & _
+            "        ByRef value As Long _" & vbCrLf & "    ) As Long"
+        HasLine t, "stdcall", "    Public DeclareWide PtrSafe Function tbf_std_add Lib ""tbfixture.dll"" ( _"
+        HasLine t, "sub", "    Public DeclareWide PtrSafe Sub tbf_handle_free CDecl Lib ""tbfixture.dll"" ( _"
+        HasLine t, "no parameters", "    Public DeclareWide PtrSafe Function tbf_ret_int CDecl Lib ""tbfixture.dll"" () As Long"
+        HasLine t, "opaque out", "        ByRef out As TBF_HANDLE, _"
+    End Sub
+
+    Private Sub Variadics()
+        Dim t As String = Text()
+        HasLine t, "variadic note", "    ' NOTE: variadic: a plain variable in the ... part is passed by address; write ByVal x or (x) to pass its value (D-006)."
+        HasLine t, "variadic tail", "        ByVal count As Long, _" & vbCrLf & "        ByVal ParamArray args As Any() _"
+        HasLine t, "va_list", "        ByVal count As Long, _" & vbCrLf & "        ByRef ParamArray args As Any() _"
+    End Sub
+
+    Private Sub KeywordsAndByValue()
+        Dim t As String = Text()
+        HasLine t, "keyword parameter", "        ByVal type As Long, _"
+        HasLine t, "keyword field", "        object As Long  ' C: int"
+        HasLine t, "struct by value parameter", "        ByVal v As TBF_S4 _"
+        HasLine t, "struct by value note", "    ' NOTE: passes or returns a struct by value; tB support is verified by the tbfixture harness (task 11)."
+    End Sub
+
+    Private Sub Deterministic()
+        Dim a As Emitter = Built()
+        Dim b As Emitter = Built()
+        SelfTest.AssertTrue "module text", a.ModuleText("tbfixture") = b.ModuleText("tbfixture")
+        SelfTest.AssertTrue "layout text", a.LayoutModuleText() = b.LayoutModuleText()
+        SelfTest.AssertTrue "report", a.ReportText() = b.ReportText()
+    End Sub
+
+    Private Sub LayoutModule()
+        Dim e As Emitter = Built()
+        Dim t As String = e.LayoutModuleText()
+        SelfTest.AssertEq "name", e.LayoutModuleName(), "tbfixture_LayoutCheck"
+        HasLine t, "module", "Module tbfixture_LayoutCheck"
+        HasLine t, "entry point", "    Public Function LayoutMismatches() As String"
+        HasLine t, "size check", "        Chk ""TBF_CALLBACKS size"", LenB(v), E(20, 40)"
+        HasLine t, "offset check", "        Chk ""TBF_POINT.y"", CLng(VarPtr(v.y) - VarPtr(v)), E(4, 4)"
+        HasLine t, "array offset", "        Chk ""TBF_RECT.weights"", CLng(VarPtr(v.weights(0)) - VarPtr(v)), E(24, 24)"
+        HasLine t, "union storage offset", "        Chk ""TBF_TAGGED.value"", CLng(VarPtr(v.value) - VarPtr(v)), E(8, 8)"
+        SelfTest.AssertTrue "over-aligned skipped", InStr(t, "TBF_ALIGNED") = 0
+    End Sub
+
+    Private Sub Report()
+        Dim r As String = Built().ReportText()
+        SelfTest.AssertEq "title (first line)", Split(r, vbCrLf)(0), "# tbBlob generation report: tbfixture"
+        HasLine r, "functions", "- functions: 89"
+        HasLine r, "rename", "- enumvalue TBF_OPEN -> TBF_OPEN_ (collides with function tbf_open)"
+        HasLine r, "skipped macro", "- TBF_INIT: initializer"
+        SelfTest.AssertTrue "lost parameter names", InStr(r, vbCrLf & "- tbf_macro_cb: could not parse") > 0, r
+        HasLine r, "by value", "- tbf_check_s4"
+        HasLine r, "packing", "- TBF_PACKED1: [PackingAlignment(1)]"
+        SelfTest.AssertTrue "over-aligned", InStr(r, vbCrLf & "- TBF_ALIGNED: over-aligned") > 0, r
+        HasLine r, "stdcall", "- tbf_std_add: stdcall; x86 export name not checked: generate with --x86-dll <x86 DLL> to bind it if it is exported as _tbf_std_add@8 (D-026)"
+        HasLine r, "disagreements", "- none"
+    End Sub
+
+    Private Sub SettingsAndGuid()
+        ' test-only helpers since D-023 (tbBlob itself writes no Settings)
+        Dim g As String = TestProjects.DeterministicGuid("tbfixture")
+        SelfTest.AssertEq "same seed, same GUID", g, TestProjects.DeterministicGuid("tbfixture")
+        SelfTest.AssertTrue "different seed, different GUID", g <> TestProjects.DeterministicGuid("tbfixturf")
+        SelfTest.AssertTrue "GUID shape", g Like "{????????-????-????-????-????????????}", g
+        Dim s As String = TestProjects.SettingsText("tbfixture")
+        SelfTest.AssertTrue "name", InStr(s, """project.name"": ""tbfixture""") > 0, s
+        SelfTest.AssertTrue "id", InStr(s, """project.id"": """ & g & """") > 0, s
+    End Sub
+
+    Private Sub DelegateAlias()
+        Dim t As String = Text()
+        HasLine t, "C comment", "    ' C: tbf_visit_alias_cb = tbf_visit_cb"
+        HasLine t, "delegate", "    Public Delegate Function tbf_visit_alias_cb CDecl ( _" & vbCrLf & _
+            "        ByRef point As TBF_POINT, _" & vbCrLf & "        ByVal context As LongPtr _" & vbCrLf & "    ) As Long"
+    End Sub
+
+    Private Sub TypeAliases()
+        Dim e As Emitter = Built()
+        Dim t As String = e.ModuleText("tbfixture")
+        Dim moduleAt As Long = InStr(t, vbCrLf & "Module tbfixture" & vbCrLf)
+        Dim want As Variant = Array("' C: typedef uint64_t tbf_size64_t" & vbCrLf & "Public Alias tbf_size64_t As LongLong /* unsigned */", _
+            "Public Alias tbf_point_alias As TBF_POINT", "Public Alias tbf_color_alias As TBF_COLOR", _
+            "' C: #define TBF_POINT_MACRO_ALIAS TBF_POINT" & vbCrLf & "Public Alias TBF_POINT_MACRO_ALIAS As TBF_POINT", _
+            "Public Alias TBF_COLOR_MACRO_ALIAS As TBF_COLOR")
+        Dim w As Variant, at As Long
+        For Each w In want
+            at = InStr(t, vbCrLf & w & vbCrLf)
+            SelfTest.AssertTrue "file-scope alias: " & Split(w, vbCrLf)(UBound(Split(w, vbCrLf))), at > 0 And at < moduleAt, "at=" & at & " module=" & moduleAt
+        Next
+        HasLine t, "declare uses the alias", "    Public DeclareWide PtrSafe Function tbf_ret_size64 CDecl Lib ""tbfixture.dll"" () As tbf_size64_t"
+        HasLine t, "field uses the alias", "        total As tbf_size64_t  ' C: tbf_size64_t"
+        Dim r As String = e.ReportText()
+        HasLine r, "report section", "## Type aliases"
+        HasLine r, "typedef alias reported", "- tbf_size64_t = LongLong /* unsigned */ (typedef)"
+        HasLine r, "macro alias reported", "- TBF_POINT_MACRO_ALIAS = TBF_POINT (macro)"
+        SelfTest.AssertTrue "alias macros are not skipped", InStr(r, "- TBF_POINT_MACRO_ALIAS: ") = 0, r
+    End Sub
+
+    Private Sub TbLayoutFunction()
+        Dim t As String = Built().LayoutModuleText()
+        HasLine t, "entry point", "    Public Function TbLayout(ByVal record As String, ByVal member As String) As Long"
+        HasLine t, "dispatch by C record name", "            Case ""TBF_POINT"": Return T_TBF_POINT(member)"
+        HasLine t, "record helper", "    Private Function T_TBF_POINT(ByVal member As String) As Long" & vbCrLf & _
+            "        Dim v As TBF_POINT" & vbCrLf & "        Select Case member" & vbCrLf & _
+            "            Case """": Return LenB(v)" & vbCrLf & _
+            "            Case ""x"": Return CLng(VarPtr(v.x) - VarPtr(v))" & vbCrLf & _
+            "            Case ""y"": Return CLng(VarPtr(v.y) - VarPtr(v))" & vbCrLf & _
+            "        End Select" & vbCrLf & "        Return -1" & vbCrLf & "    End Function"
+        HasLine t, "array member", "            Case ""weights"": Return CLng(VarPtr(v.weights(0)) - VarPtr(v))"
+        HasLine t, "anonymous union member via its storage", "            Case ""as_float"": Return CLng(VarPtr(v.union_1(0)) - VarPtr(v)) + 0"
+        HasLine t, "union member", "            Case ""d"": Return CLng(VarPtr(v.union_data(0)) - VarPtr(v)) + 0"
+        SelfTest.AssertTrue "over-aligned record has no helper", InStr(t, "T_TBF_ALIGNED") = 0
+    End Sub
+
+    Private Function Exports(ByVal names As String) As Collection
+        Dim d As New Collection
+        d.KeyCompareMode = vbBinaryCompare
+        Dim nm As Variant
+        For Each nm In Split(names, "|")
+            d.Add True, CStr(nm)
+        Next
+        Return d
+    End Function
+
+    Private Sub StdcallBinding()
+        Dim e As Emitter = Built(Exports("_tbf_std_add@8|tbf_std_sub|tbf_ret_int"))
+        Dim t As String = e.ModuleText("tbfixture")
+        HasLine t, "decorated: x64 plain, x86 aliased", "    #If Win64 Then" & vbCrLf & _
+            "    Public DeclareWide PtrSafe Function tbf_std_add Lib ""tbfixture.dll"" ( _" & vbCrLf & _
+            "        ByVal a As Long, _" & vbCrLf & "        ByVal b As Long _" & vbCrLf & "    ) As Long" & vbCrLf & _
+            "    #Else" & vbCrLf & _
+            "    Public DeclareWide PtrSafe Function tbf_std_add Lib ""tbfixture.dll"" Alias ""_tbf_std_add@8"" ( _" & vbCrLf & _
+            "        ByVal a As Long, _" & vbCrLf & "        ByVal b As Long _" & vbCrLf & "    ) As Long" & vbCrLf & _
+            "    #End If"
+        HasLine t, "undecorated (.def): one plain declare", "    ' C: int tbf_std_sub(int a, int b)" & vbCrLf & _
+            "    Public DeclareWide PtrSafe Function tbf_std_sub Lib ""tbfixture.dll"" ( _"
+        SelfTest.AssertTrue "cdecl functions are not doubled", InStr(t, "#If Win64 Then" & vbCrLf & "    Public DeclareWide PtrSafe Function tbf_ret_int") = 0
+        Dim r As String = e.ReportText()
+        HasLine r, "report decorated", "- tbf_std_add: stdcall; bound on x86 as _tbf_std_add@8 (D-026)"
+        HasLine r, "report undecorated", "- tbf_std_sub: stdcall; exported undecorated on x86"
+    End Sub
+
+    Private Sub StdcallReported()
+        Dim t As String = Built().ModuleText("tbfixture")
+        SelfTest.AssertTrue "not checked: no #If pair of declares", InStr(t, "#If Win64 Then" & vbCrLf & "    Public DeclareWide") = 0
+        HasLine Built().ReportText(), "not checked", "- tbf_std_sub: stdcall; x86 export name not checked: generate with --x86-dll <x86 DLL> to bind it if it is exported as _tbf_std_sub@8 (D-026)"
+        HasLine Built(Exports("tbf_ret_int")).ReportText(), "not exported", "- tbf_std_add: stdcall; the x86 DLL exports neither tbf_std_add nor _tbf_std_add@8"
+    End Sub
+
+    Private Sub PeExportNames()
+        Dim bin As String = SelfTest.RepoRoot() & "\tests\fixture-c\bin"
+        Dim x86 As Collection = PeExports.ExportNames(bin & "\win32\tbfixture.dll")
+        SelfTest.AssertTrue "x86 decorated stdcall", x86.Exists("_tbf_std_add@8")
+        SelfTest.AssertTrue "x86 .def stdcall undecorated", x86.Exists("tbf_std_sub")
+        SelfTest.AssertTrue "x86 no plain tbf_std_add", Not x86.Exists("tbf_std_add")
+        SelfTest.AssertTrue "x86 cdecl", x86.Exists("tbf_ret_int")
+        SelfTest.AssertEq "x86 count (89 exported functions)", x86.Count, 89
+        Dim x64 As Collection = PeExports.ExportNames(bin & "\win64\tbfixture.dll")
+        SelfTest.AssertTrue "x64 plain stdcall", x64.Exists("tbf_std_add")
+        SelfTest.AssertEq "x64 count", x64.Count, 89
+        SelfTest.AssertTrue "declared but undefined function not exported (D-031)", Not x86.Exists("tbf_not_exported") And Not x64.Exists("tbf_not_exported")
+        SelfTest.AssertTrue "case-sensitive", Not x64.Exists("TBF_STD_ADD")
+    End Sub
+
+    Private Sub PeNotADll()
+        Dim path As String = SelfTest.RepoRoot() & "\tests\fixture-c\tbfixture.h"
+        Dim msg As String
+        On Error Resume Next
+        Dim ignored As Collection = PeExports.ExportNames(path)
+        msg = Err.Description
+        On Error GoTo 0
+        SelfTest.AssertTrue "raises naming the file", InStr(msg, "cannot read the exports of " & path & ": no MZ signature") > 0, msg
+    End Sub
+
+    Private Sub LoaderModule()
+        Dim e As Emitter = Built()
+        Dim t As String = e.LoaderModuleText()
+        SelfTest.AssertEq "name", e.LoaderModuleName(), "tbfixture_Loader"
+        HasLine t, "module", "Module tbfixture_Loader"
+        HasLine t, "dll name", "    Private Const DLL_NAME As String = ""tbfixture.dll"""
+        HasLine t, "arch folder", "    #If Win64 Then" & vbCrLf & "        Private Const ARCH_DIR As String = ""win64""" & vbCrLf & _
+            "    #Else" & vbCrLf & "        Private Const ARCH_DIR As String = ""win32""" & vbCrLf & "    #End If"
+        HasLine t, "Load", "    Public Function Load(ByVal folder As String) As LongPtr"
+        HasLine t, "LoadFile", "    Public Function LoadFile(ByVal path As String) As LongPtr"
+        HasLine t, "IsLoaded", "    Public Function IsLoaded() As Boolean"
+        HasLine t, "arch path first", "        Dim archPath As String = folder & ""\"" & ARCH_DIR & ""\"" & DLL_NAME"
+        HasLine t, "flat path second", "        Dim flatPath As String = folder & ""\"" & DLL_NAME"
+        HasLine t, "dependencies from the DLL's folder", "    Private Const LOAD_WITH_ALTERED_SEARCH_PATH As Long = 8"
+        HasLine t, "error names the paths tried", "        Err.Raise LOAD_FAILED, , ""cannot load "" & DLL_NAME & "": tried "" & tried"
+        SelfTest.AssertTrue "no Declare of the library itself", InStr(t, "Lib ""tbfixture.dll"" (") = 0
+    End Sub
+
+    Private Sub LoadingReport()
+        Dim r As String = Built().ReportText()
+        HasLine r, "section", "## Loading the DLL"
+        HasLine r, "search order", "- The declares bind to tbfixture.dll by name on the first call, through the Windows DLL search order: the folder of the process's EXE, the system folders, the current folder, then PATH. Subfolders are never searched; for a tB DLL or add-in, the EXE folder is the host's."
+        HasLine r, "loader", "- To load it from elsewhere, call tbfixture_Loader.Load(folder) before the first call: it loads folder\win32\tbfixture.dll or folder\win64\tbfixture.dll (matching the running code) when that file exists, else folder\tbfixture.dll, with the DLL's own dependencies from its folder. tbfixture_Loader.LoadFile(path) loads one full path."
+    End Sub
+
+    Private Sub ArchConstants()
+        Dim e As Emitter = Built()
+        Dim t As String = e.ModuleText("tbfixture")
+        HasLine t, "different body", "    #If Win64 Then" & vbCrLf & _
+            "    Public Const TBF_ARCH_BITS As Long = 64  ' C: #define TBF_ARCH_BITS 64" & vbCrLf & "    #Else" & vbCrLf & _
+            "    Public Const TBF_ARCH_BITS As Long = 32  ' C: #define TBF_ARCH_BITS 32" & vbCrLf & "    #End If"
+        HasLine t, "same body, different value and type", "    #If Win64 Then" & vbCrLf & _
+            "    Public Const TBF_SIZE_MAX As LongLong = -1^  ' C: #define TBF_SIZE_MAX SIZE_MAX" & vbCrLf & "    #Else" & vbCrLf & _
+            "    Public Const TBF_SIZE_MAX As Long = &HFFFFFFFF  ' C: #define TBF_SIZE_MAX SIZE_MAX" & vbCrLf & "    #End If"
+        HasLine t, "different only through references", "    Public Const TBF_SIZE_MAX_ALIAS As LongLong = -1^  ' C: #define TBF_SIZE_MAX_ALIAS TBF_SIZE_MAX" & vbCrLf & "    #Else" & vbCrLf & _
+            "    Public Const TBF_SIZE_MAX_ALIAS As Long = &HFFFFFFFF  ' C: #define TBF_SIZE_MAX_ALIAS TBF_SIZE_MAX"
+        HasLine t, "equal on both: one line", "    Public Const TBF_VERSION_MAJOR As Long = 1  ' C: #define TBF_VERSION_MAJOR 1"
+        SelfTest.AssertTrue "equal on both: no #If around it", InStr(t, "#If Win64 Then" & vbCrLf & "    Public Const TBF_VERSION_MAJOR") = 0
+        SelfTest.AssertTrue "x86-only macro not emitted", InStr(t, "TBF_X86_ONLY") = 0
+        Dim r As String = e.ReportText()
+        HasLine r, "report section", "## Architecture-dependent constants"
+        HasLine r, "report entry", "- TBF_SIZE_MAX: x86 As Long = &HFFFFFFFF, x64 As LongLong = -1^"
+        HasLine r, "x86-only reported", "- TBF_X86_ONLY: defined on x86 only (As Long = 1); one tB source cannot have it on x64"
+        HasLine r, "constants counted once", "- constants: 20"
+    End Sub
+
+    Private Sub SameNameAliasDoc()
+        Dim t As String = Built().ModuleText("tbfixture")
+        HasLine t, "same-name alias keeps the typedef's doc", "/** An opaque handle declared with the same name as its struct (libgit2's style). */" & vbCrLf & _
+            "' C: struct tbf_same (opaque)" & vbCrLf & "Public Alias tbf_same As LongPtr"
+        HasLine t, "different-name alias unchanged", "/** An opaque handle whose typedef name differs from its struct name. */" & vbCrLf & _
+            "' C: typedef struct tbf_handle_impl TBF_HANDLE (opaque)" & vbCrLf & "Public Alias TBF_HANDLE As LongPtr"
+        HasLine t, "a handle returned directly", "    Public DeclareWide PtrSafe Function tbf_same_get CDecl Lib ""tbfixture.dll"" () As tbf_same"
+    End Sub
+
+    ' Every function of the fixture's x64 model as the x86 DLL exports it, except those in skip.
+    Private Function ExportsLikeDll(ByVal skip As String) As Collection
+        Dim root As String = SelfTest.RepoRoot()
+        Dim m As New CxModel
+        m.Load SelfTest.Fixture("tbfixture_x64.xml"), root & "\tests\fixture-c"
+        Dim d As New Collection
+        d.KeyCompareMode = vbBinaryCompare
+        Dim el As Object, nm As String
+        For Each el In m.Functions()
+            nm = m.Attr(el, "name")
+            If nm = "tbf_std_add" Then nm = "_tbf_std_add@8"
+            If InStr("|" & skip & "|", "|" & nm & "|") = 0 Then d.Add True, nm
+        Next
+        Return d
+    End Function
+
+    Private Sub NotExported()
+        Dim e As Emitter = Built(ExportsLikeDll("tbf_not_exported"))
+        Dim t As String = e.ModuleText("tbfixture")
+        HasLine t, "NOTE above the declare", "    ' C: int tbf_not_exported()" & vbCrLf & _
+            "    ' NOTE: not exported by tbfixture.dll (x86): a call fails at run time"
+        SelfTest.AssertEq "only that function is flagged", UBound(Split(t, "' NOTE: not exported by")), 1
+        Dim r As String = e.ReportText()
+        HasLine r, "report section", "## Declared but not exported"
+        HasLine r, "report entry", "- tbf_not_exported: not exported by the x86 DLL; a call fails at run time"
+        SelfTest.AssertTrue "without --x86-dll nothing is flagged", InStr(Built().ModuleText("tbfixture"), "not exported by") = 0
+        Dim r2 As String = Built(ExportsLikeDll("tbf_not_exported|_tbf_std_add@8")).ReportText()
+        Dim sec As String = Mid$(r2, InStr(r2, "## Declared but not exported"))
+        sec = Left$(sec, InStr(3, sec, vbCrLf & "## "))
+        SelfTest.AssertTrue "stdcall exported under neither name is listed in that section", _
+            InStr(sec, vbCrLf & "- tbf_std_add: stdcall; the x86 DLL exports neither tbf_std_add nor _tbf_std_add@8" & vbCrLf) > 0, sec
+    End Sub
+
+    Private Sub LateStructDoc()
+        Dim t As String = Built().ModuleText("tbfixture")
+        HasLine t, "body without a comment: the typedef's doc", "    /** A struct named through its typedef here and defined further down without a comment (git_transport's pattern). */" & vbCrLf & _
+            "    ' C: struct tbf_late (4 bytes on x86, 4 on x64)" & vbCrLf & "    Public Type tbf_late"
+        HasLine t, "a struct with its own doc keeps it", "    /** A point. */" & vbCrLf & "    ' C: struct TBF_POINT (8 bytes on x86, 8 on x64)" & vbCrLf & "    Public Type TBF_POINT"
+    End Sub
+
+    Private Sub WriteAndImport()
+        Dim e As Emitter = Built()
+        Dim t As String = SelfTest.NewTempFolder()
+        FileSys.MakeDirs t & "\src"
+        FileSys.WriteTextUtf8 t & "\src\tbfixture.twin", e.ModuleText("tbfixture")
+        FileSys.WriteTextUtf8 t & "\src\" & e.LayoutModuleName() & ".twin", e.LayoutModuleText()
+        FileSys.WriteTextUtf8 t & "\src\" & e.LoaderModuleName() & ".twin", e.LoaderModuleText()
+        Dim code As Long = TestProjects.PackAndImport(t & "\src", "tbfixture", t & "\tbfixture", t & "\tbfixture.twinproj")
+        Dim exported As String = t & "\exported"
+        Dim backCode As Long = Tools.RunCommand(Tools.Quote(Tools.ImportToolPath()) & " export " & Tools.Quote(t & "\tbfixture.twinproj") & " " & Tools.Quote(exported))
+        Dim written As String, back As String
+        If FileSys.KindOf(t & "\tbfixture\Sources\tbfixture.twin") = FileSys.KIND_FILE Then written = FileSys.ReadTextUtf8(t & "\tbfixture\Sources\tbfixture.twin")
+        If FileSys.KindOf(exported & "\Sources\tbfixture.twin") = FileSys.KIND_FILE Then back = FileSys.ReadTextUtf8(exported & "\Sources\tbfixture.twin")
+        Dim layoutBack As Boolean = FileSys.KindOf(exported & "\Sources\tbfixture_LayoutCheck.twin") = FileSys.KIND_FILE
+        FileSys.RemovePath t
+        SelfTest.AssertEq "import exit code", code, 0
+        SelfTest.AssertEq "export exit code", backCode, 0
+        SelfTest.AssertTrue "module written", Len(written) > 0
+        SelfTest.AssertTrue "module exports back unchanged", written = back, "lengths " & Len(written) & " / " & Len(back)
+        SelfTest.AssertTrue "layout module packed", layoutBack
+    End Sub
+End Module

@@ -1,0 +1,171 @@
+' Tests for DocComments (task 8.0): doc comments by byte offset, enum-value trailing comments,
+' tB-safe comment lines, and function-type parameter names recovered from the header.
+' Data: the tbfixture CastXML snapshot (offsets into tests\fixture-c\tbfixture.h, kept byte-exact
+' by .gitattributes).
+Module Tests_Docs
+    Public Const MODULE_ID As Long = 7
+
+    Public Sub Register()
+        SelfTest.Add "docs: a one-line /** */ comment", MODULE_ID, 1
+        SelfTest.Add "docs: a multi-line block keeps its lines without markers", MODULE_ID, 2
+        SelfTest.Add "docs: non-ASCII comment text is decoded as UTF-8", MODULE_ID, 3
+        SelfTest.Add "docs: a trailing /**< */ field comment", MODULE_ID, 4
+        SelfTest.Add "docs: a declaration without a doc comment gives none", MODULE_ID, 5
+        SelfTest.Add "docs: comment lines are made safe for tB (trailing _ guarded)", MODULE_ID, 6
+        SelfTest.Add "docs: enum values get their trailing comments from the source line", MODULE_ID, 7
+        SelfTest.Add "docs: parameter names of a typedef'd callback are recovered", MODULE_ID, 8
+        SelfTest.Add "docs: parameter names of a function-pointer field are recovered", MODULE_ID, 9
+        SelfTest.Add "docs: unnamed parameters become argN and nothing is reported lost", MODULE_ID, 10
+        SelfTest.Add "docs: a declaration that cannot be parsed falls back to argN and says so", MODULE_ID, 11
+        SelfTest.Add "docs: a header that cannot be read gives no comment and a problem, not a crash", MODULE_ID, 12
+        SelfTest.Add "docs: the raw comment is the header's text verbatim, for a tB /* */ block", MODULE_ID, 13
+    End Sub
+
+    Public Sub RunTest(ByVal index As Long)
+        Select Case index
+            Case 1: OneLine
+            Case 2: MultiLine
+            Case 3: NonAscii
+            Case 4: TrailingFieldComment
+            Case 5: NoComment
+            Case 6: SafeLines
+            Case 7: EnumValueComments
+            Case 8: TypedefParamNames
+            Case 9: FieldParamNames
+            Case 10: UnnamedParams
+            Case 11: UnparseableParams
+            Case 12: UnreadableHeader
+            Case 13: RawVerbatim
+            Case Else: Err.Raise SelfTest.CHECK_FAILED, , "no test " & index & " in Tests_Docs"
+        End Select
+    End Sub
+
+    ' ---- helpers ---------------------------------------------------------------
+
+    Private Function Mapper() As TypeMapper
+        Dim m As New CxModel
+        m.Load SelfTest.Fixture("tbfixture_x64.xml"), SelfTest.RepoRoot() & "\tests\fixture-c"
+        Dim t As New TypeMapper
+        t.Init m
+        Return t
+    End Function
+
+    Private Function Joined(c As Collection) As String
+        Dim v As Variant, s As String
+        For Each v In c
+            s &= v & "|"
+        Next
+        Return s
+    End Function
+
+    Private Function FieldElement(t As TypeMapper, ByVal record As String, ByVal field As String) As Object
+        Dim f As FieldInfo
+        For Each f In t.FieldsOf(t.FindRecord(record))
+            If f.Name = field Then Return f.Element
+        Next
+        Return Nothing
+    End Function
+
+    ' ---- tests -----------------------------------------------------------------------
+
+    Private Sub OneLine()
+        Dim t As TypeMapper = Mapper()
+        SelfTest.AssertEq "lines", Joined(DocComments.DocFor(t.Model, t.FindFunction("tbf_check_scalars"))), _
+            "Checks each argument against the known values of TBF_SCALARS, in field order.|"
+    End Sub
+
+    Private Sub MultiLine()
+        Dim t As TypeMapper = Mapper()
+        Dim d As Collection = DocComments.DocFor(t.Model, t.FindRecord("TBF_SCALARS"))
+        SelfTest.AssertEq "count", d.Count, 5
+        SelfTest.AssertEq "first", d(1), "All C scalar types as fields."
+        SelfTest.AssertEq "last", d(5), "f=1.5, d=-2.25, b=1, z=123456, ip=-7, wc=0x3A9 (Greek capital omega)."
+        Dim k As Collection = DocComments.DocFor(t.Model, t.FindRecord("TBF_KEYWORDS"))
+        SelfTest.AssertEq "keywords doc", Joined(k), "Field names that are twinBASIC keywords. Known values: 1, 2, 3, ... in field order.|" & _
+            "A doc line ending in an underscore looks like a tB line continuation: some_name_|"
+    End Sub
+
+    Private Sub NonAscii()
+        Dim t As TypeMapper = Mapper()
+        SelfTest.AssertEq "text", Joined(DocComments.DocFor(t.Model, t.FindFunction("tbf_hello_utf8"))), _
+            "A static UTF-8 string: ""h" & ChrW(&HE9) & "llo " & ChrW(&H2713) & """ (e-acute, check mark).|"
+    End Sub
+
+    Private Sub TrailingFieldComment()
+        Dim t As TypeMapper = Mapper()
+        SelfTest.AssertEq "x", Joined(DocComments.DocFor(t.Model, FieldElement(t, "TBF_POINT", "x"))), "horizontal|"
+        SelfTest.AssertEq "y", Joined(DocComments.DocFor(t.Model, FieldElement(t, "TBF_POINT", "y"))), "vertical|"
+    End Sub
+
+    Private Sub NoComment()
+        Dim t As TypeMapper = Mapper()
+        SelfTest.AssertEq "none", DocComments.DocFor(t.Model, t.FindFunction("tbf_ret_int")).Count, 0
+    End Sub
+
+    Private Sub SafeLines()
+        SelfTest.AssertEq "trailing underscore", DocComments.SafeCommentLine("some_name_"), "some_name_."
+        SelfTest.AssertEq "plain", DocComments.SafeCommentLine("plain"), "plain"
+        SelfTest.AssertEq "trailing spaces", DocComments.SafeCommentLine("trailing   "), "trailing"
+        SelfTest.AssertEq "underscore then spaces", DocComments.SafeCommentLine("x _  "), "x _."
+    End Sub
+
+    Private Sub EnumValueComments()
+        Dim t As TypeMapper = Mapper()
+        Dim e As Object = t.Model.Enumerations()(1)
+        SelfTest.AssertEq "enum", t.Model.NameOf(e), "TBF_COLOR"
+        SelfTest.AssertEq "/**< */", DocComments.EnumValueComment(t.Model, e, "TBF_RED"), "negative value"
+        SelfTest.AssertEq "/* */", DocComments.EnumValueComment(t.Model, e, "TBF_GREEN"), "plain trailing comment"
+        SelfTest.AssertEq "none", DocComments.EnumValueComment(t.Model, e, "TBF_BLUE"), ""
+    End Sub
+
+    Private Sub TypedefParamNames()
+        Dim t As TypeMapper = Mapper()
+        Dim lost As String
+        SelfTest.AssertEq "cdecl", Joined(DocComments.ParamNamesFor(t.Model, t.FindTypedef("tbf_visit_cb"), 2, lost)), "point|context|"
+        SelfTest.AssertEq "nothing lost", lost, ""
+        SelfTest.AssertEq "stdcall", Joined(DocComments.ParamNamesFor(t.Model, t.FindTypedef("tbf_visit_std_cb"), 2, lost)), "value|context|"
+        SelfTest.AssertEq "nothing lost (stdcall)", lost, ""
+    End Sub
+
+    Private Sub FieldParamNames()
+        Dim t As TypeMapper = Mapper()
+        Dim lost As String
+        SelfTest.AssertEq "notify", Joined(DocComments.ParamNamesFor(t.Model, FieldElement(t, "TBF_CALLBACKS", "notify"), 2, lost)), "code|context|"
+        SelfTest.AssertEq "nothing lost", lost, ""
+    End Sub
+
+    Private Sub UnnamedParams()
+        Dim t As TypeMapper = Mapper()
+        Dim lost As String
+        SelfTest.AssertEq "all unnamed", Joined(DocComments.ParamNamesFor(t.Model, t.FindTypedef("tbf_unnamed_cb"), 2, lost)), "arg1|arg2|"
+        SelfTest.AssertEq "unnamed is not a loss", lost, ""
+        SelfTest.AssertEq "mixed", Joined(DocComments.ParamNamesFor(t.Model, t.FindTypedef("tbf_mixed_cb"), 2, lost)), "count|arg2|"
+        SelfTest.AssertEq "mixed is not a loss", lost, ""
+    End Sub
+
+    Private Sub UnparseableParams()
+        Dim t As TypeMapper = Mapper()
+        Dim lost As String
+        SelfTest.AssertEq "fallback", Joined(DocComments.ParamNamesFor(t.Model, t.FindTypedef("tbf_macro_cb"), 2, lost)), "arg1|arg2|"
+        SelfTest.AssertTrue "reported", InStr(lost, "could not") > 0, "lost=[" & lost & "]"
+    End Sub
+
+    Private Sub UnreadableHeader()
+        Dim m As New CxModel
+        m.Load SelfTest.RepoRoot() & "\tests\testdata\model\basic.xml", "C:\lib\include"
+        Dim d As Collection = DocComments.DocFor(m, m.ById("_3"))
+        SelfTest.AssertEq "no lines", d.Count, 0
+        SelfTest.AssertTrue "problem names the header", InStr(DocComments.LastProblem, "lib.h") > 0, "problem=[" & DocComments.LastProblem & "]"
+    End Sub
+
+    Private Sub RawVerbatim()
+        Dim t As TypeMapper = Mapper()
+        SelfTest.AssertEq "one line", DocComments.DocRaw(t.Model, t.FindFunction("tbf_check_scalars")), _
+            "/** Checks each argument against the known values of TBF_SCALARS, in field order. */"
+        SelfTest.AssertEq "multi-line, CRLF", DocComments.DocRaw(t.Model, t.FindRecord("TBF_KEYWORDS")), _
+            "/**" & vbCrLf & " * Field names that are twinBASIC keywords. Known values: 1, 2, 3, ... in field order." & vbCrLf & _
+            " * A doc line ending in an underscore looks like a tB line continuation: some_name_" & vbCrLf & " */"
+        SelfTest.AssertEq "trailing field comment", DocComments.DocRaw(t.Model, FieldElement(t, "TBF_POINT", "x")), "/**< horizontal */"
+        SelfTest.AssertEq "none", DocComments.DocRaw(t.Model, t.FindFunction("tbf_ret_int")), ""
+    End Sub
+End Module

@@ -1,0 +1,291 @@
+' Tests for the command line, console capture, UTF-8 file I/O, the self-test runner and the
+' import tool (task 1.0).
+Module Tests_Cli
+    Public Const MODULE_ID As Long = 1
+
+    Public Sub Register()
+        SelfTest.Add "cli: no arguments is a usage error (exit 2) and prints usage", MODULE_ID, 1
+        SelfTest.Add "cli: an unknown option is a usage error naming it", MODULE_ID, 2
+        SelfTest.Add "cli: --help and -h print usage and exit 0", MODULE_ID, 3
+        SelfTest.Add "cli: fewer than four positional arguments is a usage error", MODULE_ID, 4
+        SelfTest.Add "cli: the output folder must not be an existing file (D-023)", MODULE_ID, 5
+        SelfTest.Add "cli: a missing header folder exits 3 and names it", MODULE_ID, 6
+        SelfTest.Add "cli: a missing entry header exits 3 and names it", MODULE_ID, 7
+        SelfTest.Add "cli: options are parsed into CliOptions", MODULE_ID, 8
+        SelfTest.Add "cli: an option without its value is a usage error", MODULE_ID, 9
+        SelfTest.Add "cli: command lines split like CommandLineToArgvW, spaces and non-ASCII kept", MODULE_ID, 10
+        SelfTest.Add "files: UTF-8 text round-trips without a byte-order mark", MODULE_ID, 11
+        SelfTest.Add "files: a leading byte-order mark is dropped when reading", MODULE_ID, 12
+        SelfTest.Add "runner: a failing test is reported as FAIL and counted", MODULE_ID, 13
+        SelfTest.Add "runner: integration tests run only when asked", MODULE_ID, 14
+        SelfTest.Add "cli: a missing --also header exits 3 and names it (D-033)", MODULE_ID, 19
+        SelfTest.Add "import tool: a tiny folder imports to a .twinproj (exit 0)", MODULE_ID, 17, True
+        SelfTest.Add "import tool: a folder without Settings fails with exit 5 and its output is kept", MODULE_ID, 18, True
+    End Sub
+
+    ' Called by SelfTest.Dispatch: runs test number index (see Register).
+    Public Sub RunTest(ByVal index As Long)
+        Select Case index
+            Case 1: NoArgsIsUsageError
+            Case 2: UnknownOptionIsUsageError
+            Case 3: HelpPrintsUsage
+            Case 4: TooFewPositionals
+            Case 5: OutputMustNotBeAFile
+            Case 6: MissingHeaderFolder
+            Case 7: MissingEntryHeader
+            Case 8: ParsesAllOptions
+            Case 9: OptionMissingValue
+            Case 10: SplitsCommandLine
+            Case 11: Utf8RoundTrip
+            Case 12: Utf8BomDropped
+            Case 13: RunnerReportsFailure
+            Case 14: RunnerSkipsIntegration
+            Case 15: SampleFails
+            Case 16: SamplePasses
+            Case 17: ImportToolPacksTinyFolder
+            Case 18: ImportToolRefusesFolderWithoutSettings
+            Case 19: MissingAlsoHeader
+            Case Else: Err.Raise SelfTest.CHECK_FAILED, , "no test " & index & " in Tests_Cli"
+        End Select
+    End Sub
+
+    ' ---- helpers ---------------------------------------------------------------
+
+    Private Function Args(ByVal joined As String) As String()
+        If Len(joined) = 0 Then Return Console.EmptyArray()
+        Return Split(joined, "|")
+    End Function
+
+    Private Function RunCaptured(ByVal joined As String, ByRef output As String) As Long
+        Dim code As Long
+        Console.StartCapture
+        On Error GoTo Failed
+        code = MainModule.Run(Args(joined))
+        output = Console.StopCapture()
+        Return code
+    Failed:
+        output = Console.StopCapture()
+        Err.Raise SelfTest.CHECK_FAILED, , "Run raised an error: " & Err.Description
+    End Function
+
+    ' ---- command line ----------------------------------------------------------
+
+    Private Sub NoArgsIsUsageError()
+        Dim out As String
+        SelfTest.AssertEq "exit code", RunCaptured("", out), MainModule.EXIT_USAGE
+        SelfTest.AssertTrue "prints usage", InStr(out, "Usage:") > 0, out
+    End Sub
+
+    Private Sub UnknownOptionIsUsageError()
+        Dim out As String
+        SelfTest.AssertEq "exit code", RunCaptured("--bogus", out), MainModule.EXIT_USAGE
+        SelfTest.AssertTrue "names the option", InStr(out, "unknown option: --bogus") > 0, out
+    End Sub
+
+    Private Sub HelpPrintsUsage()
+        Dim out As String
+        SelfTest.AssertEq "--help exit code", RunCaptured("--help", out), MainModule.EXIT_OK
+        SelfTest.AssertTrue "--help prints usage", InStr(out, "Usage:") > 0, out
+        SelfTest.AssertEq "-h exit code", RunCaptured("-h", out), MainModule.EXIT_OK
+        SelfTest.AssertTrue "-h prints usage", InStr(out, "Usage:") > 0, out
+    End Sub
+
+    Private Sub TooFewPositionals()
+        Dim out As String
+        SelfTest.AssertEq "exit code", RunCaptured("C:\headers|git2.h|git2.dll", out), MainModule.EXIT_USAGE
+        SelfTest.AssertTrue "says what is expected", InStr(out, "expects 4 arguments") > 0, out
+    End Sub
+
+    Private Sub OutputMustNotBeAFile()
+        Dim out As String
+        Dim folder As String = SelfTest.NewTempFolder()
+        FileSys.WriteTextUtf8 folder & "\a.h", "int a(void);"
+        FileSys.WriteTextUtf8 folder & "\taken.txt", "x"
+        Dim code As Long = RunCaptured(folder & "|a.h|a.dll|" & folder & "\taken.txt", out)
+        FileSys.RemovePath folder
+        SelfTest.AssertEq "exit code", code, MainModule.EXIT_USAGE
+        SelfTest.AssertTrue "says why", InStr(out, "is a file, not a folder") > 0, out
+    End Sub
+
+    Private Sub MissingHeaderFolder()
+        Dim out As String
+        Dim missing As String = FileSys.TempFolder() & "\tbBlob-no-such-folder-" & Format$(Timer * 1000, "0")
+        SelfTest.AssertEq "exit code", RunCaptured(missing & "|git2.h|git2.dll|C:\out\git2", out), MainModule.EXIT_MISSING_PATH
+        SelfTest.AssertTrue "names the folder", InStr(out, missing) > 0, out
+    End Sub
+
+    Private Sub MissingEntryHeader()
+        Dim out As String
+        Dim folder As String = SelfTest.NewTempFolder()
+        Dim code As Long = RunCaptured(folder & "|nothere.h|x.dll|" & folder & "\out", out)
+        FileSys.RemovePath folder
+        SelfTest.AssertEq "exit code", code, MainModule.EXIT_MISSING_PATH
+        SelfTest.AssertTrue "names the header", InStr(out, "nothere.h") > 0, out
+    End Sub
+
+    Private Sub MissingAlsoHeader()
+        Dim out As String
+        Dim folder As String = SelfTest.NewTempFolder()
+        FileSys.WriteTextUtf8 folder & "\a.h", "int x;" & vbCrLf
+        Dim code As Long = RunCaptured(folder & "|a.h|x.dll|" & folder & "\out|--also|nothere_sys.h", out)
+        FileSys.RemovePath folder
+        SelfTest.AssertEq "exit code", code, MainModule.EXIT_MISSING_PATH
+        SelfTest.AssertTrue "names the header", InStr(out, "--also header not found") > 0 And InStr(out, "nothere_sys.h") > 0, out
+    End Sub
+
+    Private Sub ParsesAllOptions()
+        Dim o As New CliOptions
+        Dim problem As String = o.Parse(Args("C:\h dir|git2.h|git2.dll|C:\out\git2|--name|Git2|-I|C:\inc1|-I|C:\inc2|-D|FOO=1|--castxml|C:\cx\castxml.exe"))
+        SelfTest.AssertEq "no problem", problem, ""
+        SelfTest.AssertEq "header folder", o.HeaderFolder, "C:\h dir"
+        SelfTest.AssertEq "entry header", o.EntryHeader, "git2.h"
+        SelfTest.AssertEq "dll", o.DllName, "git2.dll"
+        SelfTest.AssertEq "output folder", o.OutputFolder, "C:\out\git2"
+        SelfTest.AssertEq "name", o.ProjectName, "Git2"
+        SelfTest.AssertEq "include count", o.IncludeDirs.Count, 2
+        SelfTest.AssertEq "include 2", o.IncludeDirs(2), "C:\inc2"
+        SelfTest.AssertEq "define", o.Defines(1), "FOO=1"
+        SelfTest.AssertEq "castxml", o.CastXmlPath, "C:\cx\castxml.exe"
+        Dim w As New CliOptions
+        SelfTest.AssertEq "--work is no longer an option (D-023)", w.Parse(Args("C:\h|a.h|a.dll|C:\o\a|--work|C:\w")), "unknown option: --work"
+        Dim d As New CliOptions
+        SelfTest.AssertEq "default parse ok", d.Parse(Args("C:\h|a.h|a.dll|C:\o\a")), ""
+        SelfTest.AssertEq "default name from dll", d.ProjectName, "a"
+        SelfTest.AssertEq "--x86-dll empty by default", d.X86DllPath, ""
+        Dim xd As New CliOptions
+        SelfTest.AssertEq "--x86-dll parses", xd.Parse(Args("C:\h|a.h|a.dll|C:\o\a|--x86-dll|C:\b\x86\a.dll")), ""
+        SelfTest.AssertEq "--x86-dll value", xd.X86DllPath, "C:\b\x86\a.dll"
+        Dim al As New CliOptions
+        SelfTest.AssertEq "--also parses", al.Parse(Args("C:\h|a.h|a.dll|C:\o\a|--also|sys\x.h|--also|sys\y.h")), ""
+        SelfTest.AssertEq "--also is repeatable, in order", al.AlsoHeaders.Count & ":" & al.AlsoHeaders(1) & ";" & al.AlsoHeaders(2), "2:sys\x.h;sys\y.h"
+        Dim an As New CliOptions
+        SelfTest.AssertEq "--also needs a value", an.Parse(Args("C:\h|a.h|a.dll|C:\o\a|--also")), "option --also needs a value"
+        Dim s As New CliOptions
+        SelfTest.AssertEq "self-test parse ok", s.Parse(Args("--self-test|--integration")), ""
+        SelfTest.AssertTrue "self-test flag", s.SelfTest
+        SelfTest.AssertTrue "integration flag", s.Integration
+    End Sub
+
+    Private Sub OptionMissingValue()
+        Dim o As New CliOptions
+        Dim problem As String = o.Parse(Args("C:\h|a.h|a.dll|C:\o\a|-I"))
+        SelfTest.AssertTrue "reports the option", InStr(problem, "-I") > 0, "problem=[" & problem & "]"
+        Dim out As String
+        SelfTest.AssertEq "exit code", RunCaptured("C:\h|a.h|a.dll|C:\o\a|--name", out), MainModule.EXIT_USAGE
+    End Sub
+
+    Private Sub SplitsCommandLine()
+        Dim parts() As String = Console.SplitCommandLine("tbBlob.exe ""C:\dir with space\caf" & ChrW(&HE9) & """ -I x """"")
+        SelfTest.AssertEq "count", UBound(parts) - LBound(parts) + 1, 5
+        SelfTest.AssertEq "program", parts(0), "tbBlob.exe"
+        SelfTest.AssertEq "quoted with space and non-ASCII", parts(1), "C:\dir with space\caf" & ChrW(&HE9)
+        SelfTest.AssertEq "option", parts(2), "-I"
+        SelfTest.AssertEq "value", parts(3), "x"
+        SelfTest.AssertEq "empty quoted argument", parts(4), ""
+    End Sub
+
+    ' ---- UTF-8 files -------------------------------------------------------------
+
+    Private Sub Utf8RoundTrip()
+        Dim folder As String = SelfTest.NewTempFolder()
+        Dim path As String = folder & "\t.txt"
+        Dim text As String = "h" & ChrW(&HE9) & "llo " & ChrW(&H2713) & vbCrLf & "line 2"
+        FileSys.WriteTextUtf8 path, text
+        Dim b() As Byte, n As Long
+        n = FileSys.ReadAllBytes(path, b)
+        Dim back As String = FileSys.ReadTextUtf8(path)
+        FileSys.RemovePath folder
+        SelfTest.AssertTrue "file not empty", n > 3, "bytes=" & n
+        SelfTest.AssertTrue "no BOM", Not (b(0) = &HEF And b(1) = &HBB And b(2) = &HBF)
+        SelfTest.AssertEq "first bytes are UTF-8 h, e-acute", Hex$(b(0)) & " " & Hex$(b(1)) & " " & Hex$(b(2)), "68 C3 A9"
+        SelfTest.AssertEq "round trip", back, text
+    End Sub
+
+    Private Sub Utf8BomDropped()
+        Dim folder As String = SelfTest.NewTempFolder()
+        Dim path As String = folder & "\bom.txt"
+        Dim b(0 To 4) As Byte
+        b(0) = &HEF: b(1) = &HBB: b(2) = &HBF: b(3) = &H41: b(4) = &H42
+        FileSys.WriteAllBytes path, b, 5
+        Dim back As String = FileSys.ReadTextUtf8(path)
+        FileSys.RemovePath folder
+        SelfTest.AssertEq "BOM dropped", back, "AB"
+    End Sub
+
+    ' ---- import tool (integration) ---------------------------------------------------
+
+    ' Writes UTF-8 with the proven TextKit/FileSys calls, so these tests don't depend on WriteTextUtf8.
+    Private Sub WriteRaw(ByVal path As String, ByVal text As String)
+        Dim b() As Byte
+        Dim n As Long = TextKit.Utf8Encode(text, b)
+        FileSys.WriteAllBytes path, b, n
+    End Sub
+
+    Private Sub ImportToolPacksTinyFolder()
+        Dim work As String = SelfTest.NewTempFolder()
+        Dim folder As String = work & "\Tiny"
+        FileSys.MakeDirs folder & "\Sources"
+        WriteRaw folder & "\Settings", "{" & vbCrLf & vbTab & """project.name"": ""Tiny""," & vbCrLf & vbTab & """project.buildType"": ""Standard EXE""" & vbCrLf & "}" & vbCrLf
+        WriteRaw folder & "\Sources\M.twin", "Module M" & vbCrLf & "End Module" & vbCrLf
+        Dim project As String = work & "\Tiny.twinproj"
+        Dim code As Long = Tools.RunImportTool(project, folder)
+        Dim kind As Long = FileSys.KindOf(project)
+        Dim toolPath As String = Tools.ImportToolPath()
+        Dim output As String = Tools.LastToolOutput
+        FileSys.RemovePath work
+        SelfTest.AssertEq "import tool path (D-047)", LCase$(toolPath), LCase$(SelfTest.RepoRoot() & "\tools\impexp\Build\tBImportExport_win64.exe")
+        SelfTest.AssertTrue "import tool found in tools\impexp\Build", FileSys.KindOf(toolPath) = FileSys.KIND_FILE, "path=[" & toolPath & "]"
+        SelfTest.AssertEq "exit code", code, 0
+        SelfTest.AssertEq "project file written", kind, FileSys.KIND_FILE
+        SelfTest.AssertTrue "tool output kept", InStr(output, "DONE") > 0, "output=[" & output & "]"
+    End Sub
+
+    Private Sub ImportToolRefusesFolderWithoutSettings()
+        Dim work As String = SelfTest.NewTempFolder()
+        Dim folder As String = work & "\NoSettings"
+        FileSys.MakeDirs folder & "\Sources"
+        WriteRaw folder & "\Sources\M.twin", "Module M" & vbCrLf & "End Module" & vbCrLf
+        Dim code As Long = Tools.RunImportTool(work & "\NoSettings.twinproj", folder)
+        Dim output As String = Tools.LastToolOutput
+        FileSys.RemovePath work
+        SelfTest.AssertEq "exit code", code, 5
+        SelfTest.AssertTrue "tool output kept for the report", Len(output) > 0, "output empty"
+    End Sub
+
+    ' ---- the runner itself (scaffold built in 1.2, so these start green) ----------
+
+    Private Sub SampleFails()
+        SelfTest.AssertEq "sample value", 1, 2
+    End Sub
+
+    Private Sub SamplePasses()
+    End Sub
+
+    Private Sub RunnerReportsFailure()
+        Dim failures As Long, out As String
+        SelfTest.PushRegistry
+        SelfTest.Add "sample fails", MODULE_ID, 15
+        SelfTest.Add "sample passes", MODULE_ID, 16
+        Console.StartCapture
+        failures = SelfTest.RunRegistered(False)
+        out = Console.StopCapture()
+        SelfTest.PopRegistry
+        SelfTest.AssertEq "failures", failures, 1
+        SelfTest.AssertTrue "FAIL line", InStr(out, "[FAIL] sample fails") > 0, out
+        SelfTest.AssertTrue "message line", InStr(out, "sample value: actual=[1] expected=[2]") > 0, out
+        SelfTest.AssertTrue "PASS line", InStr(out, "[PASS] sample passes") > 0, out
+        SelfTest.AssertTrue "total line", InStr(out, "1/2 tests passed.") > 0, out
+    End Sub
+
+    Private Sub RunnerSkipsIntegration()
+        Dim failures As Long, out As String
+        SelfTest.PushRegistry
+        SelfTest.Add "integration sample fails", MODULE_ID, 15, True
+        Console.StartCapture
+        failures = SelfTest.RunRegistered(False)
+        out = Console.StopCapture()
+        SelfTest.PopRegistry
+        SelfTest.AssertEq "not run without --integration", failures, 0
+        SelfTest.AssertTrue "not listed", InStr(out, "integration sample fails") = 0, out
+    End Sub
+End Module

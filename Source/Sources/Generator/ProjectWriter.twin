@@ -1,0 +1,19 @@
+' Writes tbBlob's output (PRD req. 28-31, D-023): <output>\report.md and <output>\Source\*.twin.
+' Nothing else -- no Settings, no .twinproj, no import tool; packaging is the consumer's concern.
+Module ProjectWriter
+    ' Writes <outputFolder>\report.md and every module plus the layout and loader modules to
+    ' <outputFolder>\Source\ (emptied first, so modules of removed headers do not linger).
+    Public Sub WriteOutput(ByVal outputFolder As String, e As Emitter)
+        Dim src As String = outputFolder & "\Source"
+        FileSys.MakeDirs outputFolder
+        If FileSys.KindOf(src) = FileSys.KIND_FOLDER Then FileSys.RemovePath src
+        FileSys.MakeDirs src
+        Dim m As Variant
+        For Each m In e.ModuleNames()
+            FileSys.WriteTextUtf8 src & "\" & m & ".twin", e.ModuleText(m)
+        Next
+        FileSys.WriteTextUtf8 src & "\" & e.LayoutModuleName() & ".twin", e.LayoutModuleText()
+        FileSys.WriteTextUtf8 src & "\" & e.LoaderModuleName() & ".twin", e.LoaderModuleText()
+        FileSys.WriteTextUtf8 outputFolder & "\report.md", e.ReportText()
+    End Sub
+End Module

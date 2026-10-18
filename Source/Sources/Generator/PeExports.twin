@@ -1,0 +1,81 @@
+' The names a Windows DLL exports, read from its PE export directory (PE32 and PE32+). Used with
+' --x86-dll to choose, per __stdcall function, between the plain and the decorated _name@N
+' export on x86 (D-026).
+Module PeExports
+    Public Const PE_INVALID As Long = vbObjectError + &H1301
+
+    ' name -> True for every name the DLL exports (a keyed Collection, case-sensitive). Raises PE_INVALID, naming the
+    ' file and the reason, when path is not a readable PE file.
+    Public Function ExportNames(ByVal path As String) As Collection
+        Dim data() As Byte
+        Dim n As Long = FileSys.ReadAllBytes(path, data)
+        Dim r As New Collection
+        r.KeyCompareMode = vbBinaryCompare      ' export names are case-sensitive
+        If n < &H40 Then Bad path, "too short for a DOS header"
+        If U16(data, n, path, 0) <> &H5A4D Then Bad path, "no MZ signature"
+        Dim pe As Long = U32(data, n, path, &H3C)
+        If U32(data, n, path, pe) <> &H4550 Then Bad path, "no PE signature"
+        Dim sections As Long = U16(data, n, path, pe + 6)
+        Dim optSize As Long = U16(data, n, path, pe + 20)
+        Dim opt As Long = pe + 24
+        Dim magic As Long = U16(data, n, path, opt)
+        Dim dirOff As Long
+        Select Case magic
+            Case &H10B: dirOff = opt + 96
+            Case &H20B: dirOff = opt + 112
+            Case Else: Bad path, "unknown optional header magic &H" & Hex$(magic)
+        End Select
+        If U32(data, n, path, dirOff - 4) < 1 Then Return r     ' NumberOfRvaAndSizes: no export entry
+        Dim expRva As Long = U32(data, n, path, dirOff)
+        If expRva = 0 Then Return r
+        Dim secTable As Long = opt + optSize
+        Dim ed As Long = RvaToOffset(data, n, path, secTable, sections, expRva)
+        Dim nameCount As Long = U32(data, n, path, ed + 24)
+        If nameCount = 0 Then Return r
+        Dim namesOff As Long = RvaToOffset(data, n, path, secTable, sections, U32(data, n, path, ed + 32))
+        Dim i As Long, s As Long, e As Long, nm As String
+        For i = 0 To nameCount - 1
+            s = RvaToOffset(data, n, path, secTable, sections, U32(data, n, path, namesOff + 4 * i))
+            nm = ""
+            e = s
+            Do While e < n
+                If data(e) = 0 Then Exit Do
+                nm &= ChrW$(data(e))
+                e += 1
+            Loop
+            If e >= n Then Bad path, "export name " & (i + 1) & " runs past the end of the file"
+            If Not r.Exists(nm) Then r.Add True, nm
+        Next
+        Return r
+    End Function
+
+    Private Sub Bad(ByVal path As String, ByVal why As String)
+        Err.Raise PE_INVALID, , "cannot read the exports of " & path & ": " & why
+    End Sub
+
+    Private Function U16(data() As Byte, ByVal n As Long, ByVal path As String, ByVal o As Long) As Long
+        If o < 0 Or o + 2 > n Then Bad path, "truncated (offset " & o & ")"
+        Return CLng(data(o)) + CLng(data(o + 1)) * &H100&
+    End Function
+
+    Private Function U32(data() As Byte, ByVal n As Long, ByVal path As String, ByVal o As Long) As Long
+        If o < 0 Or o + 4 > n Then Bad path, "truncated (offset " & o & ")"
+        Dim v As LongLong = CLngLng(data(o)) + CLngLng(data(o + 1)) * &H100^ + CLngLng(data(o + 2)) * &H10000^ + CLngLng(data(o + 3)) * &H1000000^
+        If v > &H7FFFFFFF^ Then Bad path, "value out of range at offset " & o
+        Return CLng(v)
+    End Function
+
+    ' The file offset of an RVA, through the section table.
+    Private Function RvaToOffset(data() As Byte, ByVal n As Long, ByVal path As String, ByVal secTable As Long, ByVal sections As Long, ByVal rva As Long) As Long
+        Dim k As Long, hdr As Long, va As Long, size As Long, rawSize As Long
+        For k = 0 To sections - 1
+            hdr = secTable + 40 * k
+            size = U32(data, n, path, hdr + 8)
+            va = U32(data, n, path, hdr + 12)
+            rawSize = U32(data, n, path, hdr + 16)
+            If rawSize > size Then size = rawSize
+            If rva >= va And rva < va + size Then Return rva - va + U32(data, n, path, hdr + 20)
+        Next
+        Bad path, "RVA &H" & Hex$(rva) & " is in no section"
+    End Function
+End Module

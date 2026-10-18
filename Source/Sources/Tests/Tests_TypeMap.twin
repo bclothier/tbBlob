@@ -1,0 +1,291 @@
+' Tests for TypeMapper (task 5.0), on the CastXML snapshots of tbfixture.h in tests\testdata\fixture
+' (regenerate with tests\testdata\regen-fixture-xml.ps1 after changing the header).
+Module Tests_TypeMap
+    Public Const MODULE_ID As Long = 4
+
+    Public Sub Register()
+        SelfTest.Add "typemap: every C scalar field maps to a same-size tB type, unsigned marked", MODULE_ID, 1
+        SelfTest.Add "typemap: nested structs, fixed arrays and delegate fields", MODULE_ID, 2
+        SelfTest.Add "typemap: an unnamed function-pointer field gets a synthesized delegate", MODULE_ID, 3
+        SelfTest.Add "typemap: a union is storage typed by its alignment plus accessors (D-018)", MODULE_ID, 4
+        SelfTest.Add "typemap: an anonymous union in a struct becomes union_1 storage plus accessors", MODULE_ID, 5
+        SelfTest.Add "typemap: bitfields share one storage field per unit", MODULE_ID, 6
+        SelfTest.Add "typemap: pointer parameters follow the D-003 rule", MODULE_ID, 7
+        SelfTest.Add "typemap: va_list, struct-by-value and scalar parameters", MODULE_ID, 8
+        SelfTest.Add "typemap: delegate (FunctionType) parameters use the same rules", MODULE_ID, 9
+        SelfTest.Add "typemap: return types, Sub for void, struct returns flagged", MODULE_ID, 10
+        SelfTest.Add "typemap: calling conventions come from the x86 model", MODULE_ID, 11
+        SelfTest.Add "typemap: packing is detected; over-alignment is unsupported", MODULE_ID, 12
+        SelfTest.Add "typemap: the fixture maps identically on x86 and x64", MODULE_ID, 13
+        SelfTest.Add "typemap: an x86/x64 difference LongPtr cannot express is reported", MODULE_ID, 14
+        SelfTest.Add "typemap: Classify names pointer-sized typedefs and delegates", MODULE_ID, 15
+        SelfTest.Add "typemap: library typedefs renaming a scalar, struct or enum are type aliases (D-025)", MODULE_ID, 16
+        SelfTest.Add "typemap: signatures and fields use the alias name", MODULE_ID, 17
+    End Sub
+
+    Public Sub RunTest(ByVal index As Long)
+        Select Case index
+            Case 1: ScalarFields
+            Case 2: NestedArraysDelegates
+            Case 3: SynthesizedDelegate
+            Case 4: UnionRecord
+            Case 5: AnonymousUnion
+            Case 6: Bitfields
+            Case 7: PointerParams
+            Case 8: OtherParams
+            Case 9: DelegateParams
+            Case 10: Returns
+            Case 11: CallConventions
+            Case 12: PackingDetection
+            Case 13: FixtureArchConsistent
+            Case 14: ArchDisagreement
+            Case 15: ClassifyKinds
+            Case 16: TypeAliasList
+            Case 17: AliasNamesUsed
+            Case Else: Err.Raise SelfTest.CHECK_FAILED, , "no test " & index & " in Tests_TypeMap"
+        End Select
+    End Sub
+
+    ' ---- helpers ---------------------------------------------------------------
+
+    Private Function Mapper(ByVal arch As String) As TypeMapper
+        Dim m As New CxModel
+        m.Load SelfTest.Fixture("tbfixture_" & arch & ".xml"), SelfTest.RepoRoot() & "\tests\fixture-c"
+        Dim t As New TypeMapper
+        t.Init m
+        Return t
+    End Function
+
+    ' "kind|type|bounds|offset" of the named member, or "(missing)".
+    Private Function Fld(t As TypeMapper, ByVal record As String, ByVal name As String) As String
+        Dim f As FieldInfo
+        Dim rec As Object = t.FindRecord(record)
+        If rec Is Nothing Then Return "(no record " & record & ")"
+        For Each f In t.FieldsOf(rec)
+            If f.Name = name Then Return f.Kind & "|" & f.TypeText & "|" & f.Bounds & "|" & f.OffsetBytes
+        Next
+        Return "(missing)"
+    End Function
+
+    ' "ByVal Long", "ByRef TBF_POINT", "va_list", ... for parameter n (1-based).
+    Private Function Prm(t As TypeMapper, fn As Object, ByVal n As Long) As String
+        If fn Is Nothing Then Return "(no function)"
+        Dim ps As Collection = t.ParamsOf(fn)
+        If n > ps.Count Then Return "(only " & ps.Count & " params)"
+        Dim p As ParamInfo = ps(n)
+        If p.IsVaList Then Return "va_list"
+        Return p.Passing & " " & p.TypeText
+    End Function
+
+    Private Function FnTypeOf(t As TypeMapper, ByVal typedefName As String) As Object
+        Dim td As Object = t.FindTypedef(typedefName)
+        If td Is Nothing Then Return Nothing
+        Dim ptr As Object = t.Model.Strip(t.Model.Attr(td, "type"))
+        Return t.Model.Strip(t.Model.Attr(ptr, "type"))
+    End Function
+
+    ' ---- tests -----------------------------------------------------------------------
+
+    Private Sub ScalarFields()
+        Dim t As TypeMapper = Mapper("x64")
+        Dim want As Variant = Array("c", "Byte", "sc", "Byte", "uc", "Byte", "s", "Integer", "us", "Integer /* unsigned */", _
+            "i", "Long", "ui", "Long /* unsigned */", "l", "Long", "ul", "Long /* unsigned */", "ll", "LongLong", _
+            "ull", "LongLong /* unsigned */", "f", "Single", "d", "Double", "b", "Byte", "z", "LongPtr", "ip", "LongPtr", _
+            "wc", "Integer /* unsigned */")
+        Dim i As Long
+        For i = 0 To UBound(want) Step 2
+            SelfTest.AssertEq "TBF_SCALARS." & want(i), Split(Fld(t, "TBF_SCALARS", want(i)), "|")(1), want(i + 1)
+        Next
+    End Sub
+
+    Private Sub NestedArraysDelegates()
+        Dim t As TypeMapper = Mapper("x64")
+        SelfTest.AssertEq "nested", Fld(t, "TBF_RECT", "tl"), "field|TBF_POINT||0"
+        SelfTest.AssertEq "char array", Fld(t, "TBF_RECT", "name"), "field|Byte|(0 To 7)|16"
+        SelfTest.AssertEq "double array", Fld(t, "TBF_RECT", "weights"), "field|Double|(0 To 2)|24"
+        SelfTest.AssertEq "version", Fld(t, "TBF_CALLBACKS", "version"), "field|Long /* unsigned */||0"
+        SelfTest.AssertEq "cdecl delegate field", Fld(t, "TBF_CALLBACKS", "visit"), "field|tbf_visit_cb||8"
+        SelfTest.AssertEq "stdcall delegate field", Fld(t, "TBF_CALLBACKS", "visit_std"), "field|tbf_visit_std_cb||16"
+        SelfTest.AssertEq "void* field", Fld(t, "TBF_CALLBACKS", "context"), "field|LongPtr||32"
+        SelfTest.AssertEq "keyword-named field keeps its C name here", Fld(t, "TBF_KEYWORDS", "type"), "field|Long||0"
+    End Sub
+
+    Private Sub SynthesizedDelegate()
+        Dim t As TypeMapper = Mapper("x64")
+        SelfTest.AssertEq "field", Fld(t, "TBF_CALLBACKS", "notify"), "field|TBF_CALLBACKS_notify_cb||24"
+        Dim s As SynthDelegate, found As Boolean
+        For Each s In t.SynthDelegates
+            If s.Name = "TBF_CALLBACKS_notify_cb" Then found = True
+        Next
+        SelfTest.AssertTrue "registered", found
+    End Sub
+
+    Private Sub UnionRecord()
+        Dim t As TypeMapper = Mapper("x64")
+        SelfTest.AssertEq "storage", Fld(t, "TBF_VALUE", "union_data"), "storage|LongLong|(0 To 0)|0"
+        SelfTest.AssertEq "int member", Fld(t, "TBF_VALUE", "i"), "accessor|Long||0"
+        SelfTest.AssertEq "double member", Fld(t, "TBF_VALUE", "d"), "accessor|Double||0"
+        SelfTest.AssertEq "array member", Fld(t, "TBF_VALUE", "bytes"), "accessor|Byte|(0 To 7)|0"
+        SelfTest.AssertEq "union field in a struct keeps its alignment", Fld(t, "TBF_TAGGED", "value"), "field|TBF_VALUE||8"
+        SelfTest.AssertEq "x86 the same", Fld(Mapper("x86"), "TBF_VALUE", "union_data"), "storage|LongLong|(0 To 0)|0"
+    End Sub
+
+    Private Sub AnonymousUnion()
+        Dim t As TypeMapper = Mapper("x64")
+        SelfTest.AssertEq "kind", Fld(t, "TBF_ANON", "kind"), "field|Long||0"
+        SelfTest.AssertEq "storage", Fld(t, "TBF_ANON", "union_1"), "storage|Long|(0 To 0)|4"
+        SelfTest.AssertEq "as_int", Fld(t, "TBF_ANON", "as_int"), "accessor|Long||4"
+        SelfTest.AssertEq "as_float", Fld(t, "TBF_ANON", "as_float"), "accessor|Single||4"
+    End Sub
+
+    Private Sub Bitfields()
+        Dim t As TypeMapper = Mapper("x64")
+        SelfTest.AssertEq "storage", Fld(t, "TBF_FLAGS", "bits_a"), "bitfield|Long /* unsigned */||0"
+        SelfTest.AssertEq "b is packed into bits_a", Fld(t, "TBF_FLAGS", "b"), "(missing)"
+        SelfTest.AssertEq "after", Fld(t, "TBF_FLAGS", "after"), "field|Long||4"
+        Dim f As FieldInfo, note As String
+        For Each f In t.FieldsOf(t.FindRecord("TBF_FLAGS"))
+            If f.Name = "bits_a" Then note = f.Note
+        Next
+        SelfTest.AssertTrue "note lists the bits", InStr(note, "a:1") > 0 And InStr(note, "b:3") > 0 And InStr(note, "c:4") > 0, note
+    End Sub
+
+    Private Sub PointerParams()
+        Dim t As TypeMapper = Mapper("x64")
+        SelfTest.AssertEq "int*", Prm(t, t.FindFunction("tbf_inc_int"), 1), "ByRef Long"
+        SelfTest.AssertEq "const int*", Prm(t, t.FindFunction("tbf_sum_ints"), 1), "ByRef Long"
+        SelfTest.AssertEq "size_t", Prm(t, t.FindFunction("tbf_sum_ints"), 2), "ByVal LongPtr"
+        SelfTest.AssertEq "int values[4]", Prm(t, t.FindFunction("tbf_sum_four"), 1), "ByRef Long"
+        SelfTest.AssertEq "const char*", Prm(t, t.FindFunction("tbf_utf8_len"), 1), "ByVal LongPtr"
+        SelfTest.AssertEq "const wchar_t* is a string pointer", Prm(t, t.FindFunction("tbf_check_wide"), 1), "ByVal LongPtr"
+        SelfTest.AssertEq "const void*", Prm(t, t.FindFunction("tbf_is_null"), 1), "ByVal LongPtr"
+        SelfTest.AssertEq "const char**", Prm(t, t.FindFunction("tbf_out_string"), 1), "ByRef LongPtr"
+        SelfTest.AssertEq "struct*", Prm(t, t.FindFunction("tbf_fill_point"), 1), "ByRef TBF_POINT"
+        SelfTest.AssertEq "opaque** (typedef name)", Prm(t, t.FindFunction("tbf_handle_new"), 1), "ByRef TBF_HANDLE"
+        SelfTest.AssertEq "opaque*", Prm(t, t.FindFunction("tbf_handle_value"), 1), "ByVal TBF_HANDLE"
+        SelfTest.AssertEq "callback typedef", Prm(t, t.FindFunction("tbf_foreach_point"), 1), "ByVal tbf_visit_cb"
+        SelfTest.AssertEq "void* context", Prm(t, t.FindFunction("tbf_foreach_point"), 2), "ByVal LongPtr"
+    End Sub
+
+    Private Sub OtherParams()
+        Dim t As TypeMapper = Mapper("x64")
+        SelfTest.AssertEq "va_list", Prm(t, t.FindFunction("tbf_vsum"), 2), "va_list"
+        SelfTest.AssertEq "struct by value", Prm(t, t.FindFunction("tbf_check_s24"), 1), "ByVal TBF_S24"
+        Dim p As ParamInfo = t.ParamsOf(t.FindFunction("tbf_check_s24"))(1)
+        SelfTest.AssertTrue "flagged as struct by value", p.IsStructByValue
+        SelfTest.AssertEq "wchar_t", Prm(t, t.FindFunction("tbf_check_scalars"), 17), "ByVal Integer /* unsigned */"
+        SelfTest.AssertEq "_Bool", Prm(t, t.FindFunction("tbf_check_scalars"), 14), "ByVal Byte"
+        SelfTest.AssertEq "double", Prm(t, t.FindFunction("tbf_check_scalars"), 13), "ByVal Double"
+        SelfTest.AssertEq "enum", Prm(t, t.FindFunction("tbf_color_value"), 1), "ByVal TBF_COLOR"
+        SelfTest.AssertEq "names kept", t.ParamsOf(t.FindFunction("tbf_keyword_params"))(5).Name, "to"
+    End Sub
+
+    Private Sub DelegateParams()
+        Dim t As TypeMapper = Mapper("x64")
+        Dim fn As Object = FnTypeOf(t, "tbf_visit_cb")
+        SelfTest.AssertEq "const TBF_POINT*", Prm(t, fn, 1), "ByRef TBF_POINT"
+        SelfTest.AssertEq "void*", Prm(t, fn, 2), "ByVal LongPtr"
+        SelfTest.AssertEq "CastXML gives FunctionType arguments no names: argN", t.ParamsOf(fn)(1).Name, "arg1"
+        SelfTest.AssertEq "return", t.ReturnOf(fn), "Long"
+    End Sub
+
+    Private Sub Returns()
+        Dim t As TypeMapper = Mapper("x64")
+        SelfTest.AssertEq "unsigned long long", t.ReturnOf(t.FindFunction("tbf_ret_ullong")), "LongLong /* unsigned */"
+        SelfTest.AssertEq "float", t.ReturnOf(t.FindFunction("tbf_ret_float")), "Single"
+        SelfTest.AssertEq "_Bool", t.ReturnOf(t.FindFunction("tbf_ret_bool")), "Byte"
+        SelfTest.AssertEq "wchar_t", t.ReturnOf(t.FindFunction("tbf_ret_wchar")), "Integer /* unsigned */"
+        SelfTest.AssertEq "size_t", t.ReturnOf(t.FindFunction("tbf_ret_size")), "LongPtr"
+        SelfTest.AssertEq "const char*", t.ReturnOf(t.FindFunction("tbf_hello_utf8")), "LongPtr"
+        SelfTest.AssertEq "const TBF_POINT*", t.ReturnOf(t.FindFunction("tbf_static_point")), "LongPtr"
+        SelfTest.AssertEq "enum", t.ReturnOf(t.FindFunction("tbf_ret_color")), "TBF_COLOR"
+        SelfTest.AssertEq "void", t.ReturnOf(t.FindFunction("tbf_handle_free")), ""
+        SelfTest.AssertEq "struct by value", t.ReturnOf(t.FindFunction("tbf_make_s4")), "TBF_S4"
+        SelfTest.AssertTrue "flagged", t.ReturnsStructByValue(t.FindFunction("tbf_make_s4"))
+        SelfTest.AssertTrue "not flagged", Not t.ReturnsStructByValue(t.FindFunction("tbf_ret_int"))
+    End Sub
+
+    Private Sub CallConventions()
+        Dim t As TypeMapper = Mapper("x86")
+        SelfTest.AssertEq "cdecl", t.CallConvOf(t.FindFunction("tbf_ret_int")), "CDecl"
+        SelfTest.AssertEq "stdcall", t.CallConvOf(t.FindFunction("tbf_std_add")), ""
+        SelfTest.AssertEq "cdecl callback", t.CallConvOf(FnTypeOf(t, "tbf_visit_cb")), "CDecl"
+        SelfTest.AssertEq "stdcall callback", t.CallConvOf(FnTypeOf(t, "tbf_visit_std_cb")), ""
+        Dim t64 As TypeMapper = Mapper("x64")
+        SelfTest.AssertEq "x64 XML has no stdcall attribute", t64.CallConvOf(t64.FindFunction("tbf_std_add")), "CDecl"
+    End Sub
+
+    Private Sub PackingDetection()
+        Dim arch As Variant
+        For Each arch In Array("x86", "x64")
+            Dim t As TypeMapper = Mapper(arch)
+            SelfTest.AssertEq arch & " pack(1)", t.Packing(t.FindRecord("TBF_PACKED1")), 1
+            SelfTest.AssertEq arch & " pack(2)", t.Packing(t.FindRecord("TBF_PACKED2")), 2
+            SelfTest.AssertEq arch & " align(16)", t.Packing(t.FindRecord("TBF_ALIGNED")), -1
+            SelfTest.AssertEq arch & " natural", t.Packing(t.FindRecord("TBF_S24")), 0
+            SelfTest.AssertEq arch & " natural with pointers", t.Packing(t.FindRecord("TBF_CALLBACKS")), 0
+            SelfTest.AssertEq arch & " bitfields", t.Packing(t.FindRecord("TBF_FLAGS")), 0
+            SelfTest.AssertEq arch & " union inside", t.Packing(t.FindRecord("TBF_TAGGED")), 0
+            SelfTest.AssertEq arch & " anonymous union inside", t.Packing(t.FindRecord("TBF_ANON")), 0
+        Next
+    End Sub
+
+    Private Sub FixtureArchConsistent()
+        Dim d As Collection = Mapper("x64").Disagreements(Mapper("x86"))
+        Dim s As Variant, all As String
+        For Each s In d
+            all &= s & "; "
+        Next
+        SelfTest.AssertEq "disagreements", d.Count & " " & all, "0 "
+    End Sub
+
+    Private Sub ArchDisagreement()
+        Dim m86 As New CxModel
+        Dim m64 As New CxModel
+        m86.Load SelfTest.RepoRoot() & "\tests\testdata\typemap\disagree_x86.xml", "C:\lib\include"
+        m64.Load SelfTest.RepoRoot() & "\tests\testdata\typemap\disagree_x64.xml", "C:\lib\include"
+        Dim t86 As New TypeMapper
+        Dim t64 As New TypeMapper
+        t86.Init m86
+        t64.Init m64
+        Dim d As Collection = t64.Disagreements(t86)
+        Dim s As Variant, all As String
+        For Each s In d
+            all &= s & "; "
+        Next
+        SelfTest.AssertTrue "field reported", InStr(all, "S.v") > 0, all
+        SelfTest.AssertTrue "parameter reported", InStr(all, "f(") > 0, all
+    End Sub
+
+    Private Sub TypeAliasList()
+        Dim t As TypeMapper = Mapper("x64")
+        Dim a As TypeAliasInfo, s As String
+        For Each a In t.TypeAliases()
+            s &= a.Name & "=" & a.Target & ";"
+        Next
+        SelfTest.AssertTrue "scalar typedef", InStr(s, "tbf_size64_t=LongLong /* unsigned */;") > 0, s
+        SelfTest.AssertTrue "struct typedef", InStr(s, "tbf_point_alias=TBF_POINT;") > 0, s
+        SelfTest.AssertTrue "enum typedef", InStr(s, "tbf_color_alias=TBF_COLOR;") > 0, s
+        SelfTest.AssertTrue "not the struct's own typedef", InStr(s, "TBF_POINT=") = 0, s
+        SelfTest.AssertTrue "not opaque", InStr(s, "TBF_HANDLE") = 0, s
+        SelfTest.AssertTrue "not callback typedefs", InStr(s, "_cb=") = 0, s
+        SelfTest.AssertTrue "not CRT typedefs", InStr(s, "size_t=") = 0 And InStr(s, "uint64_t=") = 0, s
+    End Sub
+
+    Private Sub AliasNamesUsed()
+        Dim t As TypeMapper = Mapper("x64")
+        SelfTest.AssertEq "return", t.ReturnOf(t.FindFunction("tbf_ret_size64")), "tbf_size64_t"
+        SelfTest.AssertEq "field", Fld(t, "TBF_SIZED", "total"), "field|tbf_size64_t||0"
+        SelfTest.AssertEq "struct param unchanged", Prm(t, t.FindFunction("tbf_check_sized"), 1), "ByRef TBF_SIZED"
+    End Sub
+
+    Private Sub ClassifyKinds()
+        Dim t As TypeMapper = Mapper("x64")
+        Dim ti As TypeInfo = t.Classify(t.Model.Attr(t.FindTypedef("size_t"), "id"))
+        SelfTest.AssertEq "size_t", ti.Kind & " " & ti.TbType, "scalar LongPtr"
+        Set ti = t.Classify(t.Model.Attr(t.FindTypedef("tbf_visit_cb"), "id"))
+        SelfTest.AssertEq "callback typedef", ti.Kind & " " & ti.TbType, "delegate tbf_visit_cb"
+        Set ti = t.Classify(t.Model.Attr(t.FindTypedef("TBF_HANDLE"), "id"))
+        SelfTest.AssertEq "opaque typedef", ti.Kind & " " & ti.TbType, "opaque TBF_HANDLE"
+    End Sub
+End Module

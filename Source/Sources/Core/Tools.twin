@@ -1,0 +1,55 @@
+' External tools: running a command line and the twinBASIC import/export tool.
+' Processes run through WScript.Shell.Run with all output redirected to a file, never a pipe
+' (D-009, D-014), so a tool that writes a lot to stderr cannot block.
+Module Tools
+    Private Declare PtrSafe Sub Sleep Lib "kernel32" (ByVal dwMilliseconds As Long)
+
+    Public LastToolOutput As String
+
+    Private Const TOOL_NAME As String = "tBImportExport_win64.exe"
+
+    ' The import/export tool, used only by tests: tools\impexp\Build\ in the repository, beside
+    ' tbBlob's own Build\ (D-047).
+    Public Function ImportToolPath() As String
+        Return FileSys.FullPath(App.Path & "\..\tools\impexp\Build\" & TOOL_NAME)
+    End Function
+
+    ' Runs commandLine through cmd /c with stdout and stderr redirected to a temp file, waits for
+    ' it, puts the output in LastToolOutput and returns the exit code.
+    Public Function RunCommand(ByVal commandLine As String) As Long
+        Dim logPath As String = FileSys.TempFolder() & "\tbBlob-cmd-" & Hex$(Timer * 1000) & "-" & Hex$(Int(Rnd * &H7FFFFFFF)) & ".log"
+        Dim sh As Object = CreateObject("WScript.Shell")
+        ' /S: cmd strips exactly the first and last quote, so the inner quoting survives.
+        Dim code As Long = sh.Run("cmd /S /C """ & commandLine & " > " & Quote(logPath) & " 2>&1""", 0, True)
+        LastToolOutput = ""
+        If FileSys.KindOf(logPath) = FileSys.KIND_FILE Then
+            LastToolOutput = FileSys.ReadTextUtf8(logPath)
+            RemoveWhenFree logPath
+        End If
+        Return code
+    End Function
+
+    ' A child of the command (e.g. one started by vcvars/MSVC) can still hold the log open for a
+    ' moment after cmd returns. Retry for up to ~1 s, then leave the temp file: cleanup must never
+    ' fail a run.
+    Private Sub RemoveWhenFree(ByVal path As String)
+        Dim attempt As Long
+        For attempt = 1 To 20
+            On Error Resume Next
+            FileSys.RemovePath path
+            If Err.Number = 0 Then Exit Sub
+            On Error GoTo 0
+            Sleep 50
+        Next
+    End Sub
+
+    ' Packs folder into project with tBImportExport_win64.exe import ... --overwrite.
+    ' Returns the tool's exit code (0 done, 6 done with a warning, else failed).
+    Public Function RunImportTool(ByVal project As String, ByVal folder As String) As Long
+        Return RunCommand(Quote(ImportToolPath()) & " import " & Quote(FileSys.FullPath(project)) & " " & Quote(FileSys.FullPath(folder)) & " --overwrite")
+    End Function
+
+    Public Function Quote(ByVal s As String) As String
+        Return """" & s & """"
+    End Function
+End Module

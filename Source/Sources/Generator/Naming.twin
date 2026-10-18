@@ -1,0 +1,129 @@
+' Naming helpers that need the model: opaque aliases (D-008), module names, and registering all
+' of a library's names in a NameTable.
+Module Naming
+    Private mReserved As Collection     ' lower-case reserved word -> True (keyed, D-040)
+
+    ' One alias per incomplete struct name and per typedef name that refers to an incomplete
+    ' struct (they can differ: typedef struct git_iterator git_note_iterator;), library only,
+    ' struct names first then typedef names, each in document order, no duplicates.
+    Public Function OpaqueAliases(m As CxModel) As Collection
+        Dim r As New Collection
+        Dim seen As New Collection          ' alias name -> True (keyed, case-sensitive, D-040)
+        seen.KeyCompareMode = vbBinaryCompare
+        Dim el As MSXML2.IXMLDOMElement, target As MSXML2.IXMLDOMElement, a As AliasInfo
+        For Each el In m.OpaqueStructs()
+            If Not seen.Exists(m.NameOf(el)) And Len(m.NameOf(el)) > 0 Then
+                seen.Add True, m.NameOf(el)
+                Set a = New AliasInfo
+                a.Name = m.NameOf(el)
+                a.StructName = m.NameOf(el)
+                Set a.Element = el
+                r.Add a
+            End If
+        Next
+        For Each el In m.Typedefs()
+            Set target = m.Strip(m.Attr(el, "type"))
+            If Not target Is Nothing Then
+                If (m.Tag(target) = "Struct" Or m.Tag(target) = "Union") And m.IsOpaque(target) And Not seen.Exists(m.Attr(el, "name")) Then
+                    seen.Add True, m.Attr(el, "name")
+                    Set a = New AliasInfo
+                    a.Name = m.Attr(el, "name")
+                    a.StructName = m.NameOf(target)
+                    Set a.Element = el
+                    r.Add a
+                End If
+            End If
+        Next
+        Return r
+    End Function
+
+    ' The tB module name for a header: its path below headerFolder without the extension, with
+    ' every non-alphanumeric character as "_" (git2/repository.h -> git2_repository). "_h" is
+    ' appended when that would be a tB reserved word or a name already in names.
+    Public Function ModuleName(ByVal headerPath As String, ByVal headerFolder As String, names As NameTable) As String
+        Dim hp As String = Replace(headerPath, "/", "\")
+        Dim hf As String = Replace(headerFolder, "/", "\")
+        Do While Len(hf) > 0 And Right$(hf, 1) = "\"
+            hf = Left$(hf, Len(hf) - 1)
+        Loop
+        Dim rel As String
+        If LCase$(Left$(hp, Len(hf) + 1)) = LCase$(hf & "\") Then rel = Mid$(hp, Len(hf) + 2) Else rel = FileSys.BaseName(hp)
+        Dim dot As Long = InStrRev(rel, ".")
+        If dot > InStrRev(rel, "\") Then rel = Left$(rel, dot - 1)
+        Dim i As Long, ch As String, s As String
+        For i = 1 To Len(rel)
+            ch = Mid$(rel, i, 1)
+            If ch Like "[A-Za-z0-9]" Then s &= ch Else s &= "_"
+        Next
+        If Len(s) = 0 Then s = "header"
+        If Left$(s, 1) Like "[0-9]" Then s = "h_" & s
+        If IsReservedWord(s) Or names.IsTaken(s) Then s &= "_h"
+        Return s
+    End Function
+
+    ' Adds every name the emitter will generate for this library (records, opaque aliases, enums,
+    ' enum values, delegates incl. synthesized ones, functions, and -- when macros is given -- the
+    ' constants) to names, then resolves it.
+    Public Sub RegisterLibrary(map As TypeMapper, names As NameTable, Optional macros As MacroTable = Nothing)
+        Dim m As CxModel = map.Model
+        Dim el As MSXML2.IXMLDOMElement, child As MSXML2.IXMLDOMElement, a As AliasInfo, s As SynthDelegate, ignored As Collection
+        For Each el In m.Records()
+            names.Add m.NameOf(el), "type"
+            Set ignored = map.FieldsOf(el)          ' registers synthesized delegates
+        Next
+        For Each a In OpaqueAliases(m)
+            names.Add a.Name, "type"
+        Next
+        For Each el In m.Enumerations()
+            names.Add m.NameOf(el), "type"
+            For Each child In el.childNodes
+                If child.nodeName = "EnumValue" Then names.Add m.Attr(child, "name"), "enumvalue"
+            Next
+        Next
+        For Each el In m.Typedefs()
+            If map.Classify(m.Attr(el, "id")).Kind = "delegate" Then names.Add m.Attr(el, "name"), "delegate"
+        Next
+        For Each el In m.Functions()
+            names.Add m.Attr(el, "name"), "function"
+            Set ignored = map.ParamsOf(el)          ' registers synthesized delegates
+        Next
+        For Each s In map.SynthDelegates
+            names.Add s.Name, "delegate"
+        Next
+        Dim ta As TypeAliasInfo
+        For Each ta In map.TypeAliases()
+            names.Add ta.Name, "type"
+        Next
+        If Not macros Is Nothing Then
+            Dim mn As Variant
+            For Each mn In macros.LibraryNames()
+                If macros.Evaluate(mn).Kind = "typealias" Then
+                    names.Add mn, "type"
+                ElseIf Len(macros.TbConstTail(macros.Evaluate(mn))) > 0 Then
+                    names.Add mn, "const"
+                End If
+            Next
+        End If
+        names.Resolve
+    End Sub
+
+    ' tB reserved words and built-in names a generated module or type name must not be.
+    Public Function IsReservedWord(ByVal name As String) As Boolean
+        If mReserved Is Nothing Then
+            Set mReserved = New Collection
+            mReserved.KeyCompareMode = vbBinaryCompare     ' keys are lower-cased below
+            Dim w As Variant
+            For Each w In Split("alias and any app as boolean byref byte byval call case class close coclass collection " & _
+                "const currency date debug decimal declare delegate dim do double each else elseif empty end enum " & _
+                "eqv err error event exit false for friend function get global gosub goto if imp implements in " & _
+                "input integer interface is let lib like line lock long longlong longptr loop me mod module name " & _
+                "new next not nothing null object of on open option optional or output paramarray preserve print " & _
+                "private property public put raiseevent redim rem resume return select set shared single static " & _
+                "step stop string sub then to true type typeof unlock until variant vb vba wend while with " & _
+                "withevents write xor", " ")
+                If Len(w) > 0 And Not mReserved.Exists(CStr(w)) Then mReserved.Add True, CStr(w)
+            Next
+        End If
+        Return mReserved.Exists(LCase$(name))
+    End Function
+End Module

@@ -1,0 +1,8 @@
+' One dependency check of tbBlob --check (Doctor.CheckEnvironment, D-035).
+Class DepCheck
+    Public Name As String
+    Public Ok As Boolean
+    Public Skipped As Boolean   ' not checked because a dependency it needs is missing (Ok is False too)
+    Public Detail As String     ' what was found, or what is missing and where it was looked for
+    Public Fix As String        ' what to do when it is missing
+End Class

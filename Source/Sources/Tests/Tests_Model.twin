@@ -1,0 +1,289 @@
+' Tests for CxModel (task 4.0): hand-written XML in tests\testdata\model\, and (integration) the
+' real CastXML output for tbfixture.h and libgit2.
+Module Tests_Model
+    Public Const MODULE_ID As Long = 3
+
+    Public Sub Register()
+        SelfTest.Add "model: elements are found by id, with tag and attributes", MODULE_ID, 1
+        SelfTest.Add "model: only declarations under the header folder are the library's", MODULE_ID, 2
+        SelfTest.Add "model: header folder matching ignores case and slashes but not partial names", MODULE_ID, 3
+        SelfTest.Add "model: anonymous typedef'd structs and enums take the typedef name", MODULE_ID, 4
+        SelfTest.Add "model: incomplete structs are opaque and not records", MODULE_ID, 5
+        SelfTest.Add "model: sizes, alignments and offsets are converted from bits to bytes", MODULE_ID, 6
+        SelfTest.Add "model: Strip skips const and elaborated wrappers", MODULE_ID, 7
+        SelfTest.Add "model: variadic functions and comments are detected", MODULE_ID, 8
+        SelfTest.Add "model: a missing file raises an error naming it", MODULE_ID, 9
+        SelfTest.Add "model: malformed XML raises an error with the parser's reason", MODULE_ID, 10
+        SelfTest.Add "model: the tbfixture XML has its 89 functions, 21 records and 3 enums", MODULE_ID, 11, True
+        SelfTest.Add "model: the libgit2 XML has 848 functions, 85 records, 84 enums (spike counts)", MODULE_ID, 12, True
+        SelfTest.Add "model: FindElement is tag-sensitive, returns the first match, Nothing when absent (D-038)", MODULE_ID, 13
+        SelfTest.Add "model: FindElement and the mapper's FindRecord/FindFunction agree with a full scan on libgit2 (D-038)", MODULE_ID, 14, True
+        SelfTest.Add "model: the fixture snapshots hold {REPO}, not the path of the machine that made them (D-051)", MODULE_ID, 15
+        SelfTest.Add "fixture: SelfTest.Fixture resolves {REPO} to this clone's root and copies other files unchanged (D-051)", MODULE_ID, 16
+    End Sub
+
+    Public Sub RunTest(ByVal index As Long)
+        Select Case index
+            Case 1: ById
+            Case 2: LibraryFilter
+            Case 3: FolderMatching
+            Case 4: AnonymousTypedefs
+            Case 5: Opaque
+            Case 6: BitsToBytes
+            Case 7: StripWrappers
+            Case 8: EllipsisAndComments
+            Case 9: MissingFile
+            Case 10: MalformedXml
+            Case 11: FixtureCounts
+            Case 13: FindElementSemantics
+            Case 14: LookupsAgreeWithScan
+            Case 12: LibGit2Counts
+            Case 15: SnapshotsHoldPlaceholder
+            Case 16: FixtureResolvesPlaceholder
+            Case Else: Err.Raise SelfTest.CHECK_FAILED, , "no test " & index & " in Tests_Model"
+        End Select
+    End Sub
+
+    ' ---- helpers ---------------------------------------------------------------
+
+    Private Function Basic(Optional ByVal headerFolder As String = "C:\lib\include") As CxModel
+        Dim m As New CxModel
+        m.Load SelfTest.RepoRoot() & "\tests\testdata\model\basic.xml", headerFolder
+        Return m
+    End Function
+
+    Private Sub FindElementSemantics()
+        Dim m As New CxModel
+        m.Load SelfTest.RepoRoot() & "\tests\testdata\model\lookup.xml", "C:\lib\include"
+        SelfTest.AssertEq "struct of that name", m.Attr(m.FindElement("Struct", "dup"), "id"), "_2"
+        SelfTest.AssertEq "typedef of the same name (tag-sensitive)", m.Attr(m.FindElement("Typedef", "dup"), "id"), "_3"
+        SelfTest.AssertEq "the first of two", m.Attr(m.FindElement("Typedef", "twice"), "id"), "_4"
+        SelfTest.AssertTrue "unknown name", m.FindElement("Typedef", "nothere") Is Nothing
+        SelfTest.AssertTrue "unknown tag", m.FindElement("Union", "dup") Is Nothing
+        SelfTest.AssertTrue "names are case-sensitive", m.FindElement("Typedef", "DUP") Is Nothing
+        SelfTest.AssertEq "a function", m.Attr(m.FindElement("Function", "dup_fn"), "id"), "_6"
+    End Sub
+
+    ' The first element with this tag and name by walking the document: what FindElement did before D-038.
+    Private Function ScanFind(m As CxModel, doc As Object, ByVal tagName As String, ByVal name As String) As Object
+        Dim node As Object
+        For Each node In doc.documentElement.childNodes
+            If node.nodeType = 1 Then
+                If node.nodeName = tagName Then
+                    If m.Attr(node, "name") = name Then Return node
+                End If
+            End If
+        Next
+        Return Nothing
+    End Function
+
+    Private Sub LookupsAgreeWithScan()
+        Dim root As String = SelfTest.RepoRoot()
+        Dim xmlPath As String = root & "\tests\harness-libgit2\bindings\Work\castxml_x64.xml"
+        Dim m As New CxModel
+        m.Load xmlPath, root & "\libgit2\vcpkg_installed\x64-windows\include"
+        Dim doc As Object = CreateObject("MSXML2.DOMDocument.6.0")
+        doc.async = False
+        doc.Load xmlPath
+        Dim map As New TypeMapper
+        map.Init m
+        Dim el As Object, bad As String, n As Long
+        For Each el In m.Records()
+            n += 1
+            If m.Attr(map.FindRecord(m.NameOf(el)), "id") <> m.Attr(el, "id") Then bad &= "record " & m.NameOf(el) & "; "
+        Next
+        For Each el In m.Functions()
+            n += 1
+            If m.Attr(map.FindFunction(m.Attr(el, "name")), "id") <> m.Attr(el, "id") Then bad &= "function " & m.Attr(el, "name") & "; "
+        Next
+        Dim t As Variant
+        For Each t In Array("size_t", "va_list", "git_repository", "git_oid", "git_time_t", "uint32_t")
+            n += 1
+            If m.Attr(m.FindElement("Typedef", t), "id") <> m.Attr(ScanFind(m, doc, "Typedef", t), "id") Then bad &= "typedef " & t & "; "
+        Next
+        SelfTest.AssertEq "lookups disagreeing with a full scan (of " & n & ")", bad, ""
+        SelfTest.AssertTrue "unknown function", map.FindFunction("no_such_function") Is Nothing
+        SelfTest.AssertTrue "unknown record", map.FindRecord("no_such_record") Is Nothing
+    End Sub
+
+    Private Function Names(m As CxModel, c As Collection) As String
+        Dim el As Object, s As String
+        For Each el In c
+            s &= m.NameOf(el) & IIf(Len(m.NameOf(el)) = 0, m.Attr(el, "name"), "") & ";"
+        Next
+        Return s
+    End Function
+
+    ' ---- unit tests ----------------------------------------------------------------
+
+    Private Sub ById()
+        Dim m As CxModel = Basic()
+        Dim el As Object = m.ById("_3")
+        SelfTest.AssertTrue "found", Not el Is Nothing
+        SelfTest.AssertEq "tag", m.Tag(el), "Function"
+        SelfTest.AssertEq "name", m.Attr(el, "name"), "lib_open"
+        SelfTest.AssertEq "absent attribute", m.Attr(el, "no_such"), ""
+        SelfTest.AssertTrue "unknown id", m.ById("_999") Is Nothing
+    End Sub
+
+    Private Sub LibraryFilter()
+        Dim m As CxModel = Basic()
+        SelfTest.AssertEq "functions", Names(m, m.Functions()), "lib_open;lib_printf;"
+        SelfTest.AssertTrue "CRT function is not the library's", Not m.InLibrary(m.ById("_2"))
+        SelfTest.AssertEq "file of a declaration", m.FileOf(m.ById("_3")), "C:\lib\include\lib.h"
+        SelfTest.AssertEq "typedefs", Names(m, m.Typedefs()), "lib_point;lib_mode;"
+    End Sub
+
+    Private Sub FolderMatching()
+        SelfTest.AssertEq "case and trailing slash", Basic("c:\LIB\include\").Functions().Count, 2
+        SelfTest.AssertEq "forward slashes", Basic("C:/lib/include").Functions().Count, 2
+        SelfTest.AssertEq "a folder whose name is a prefix does not match", Basic("C:\lib\inc").Functions().Count, 0
+        SelfTest.AssertEq "subfolders are included", Basic("C:\lib\include").Enumerations().Count, 1
+    End Sub
+
+    Private Sub AnonymousTypedefs()
+        Dim m As CxModel = Basic()
+        SelfTest.AssertEq "anonymous struct", m.NameOf(m.ById("_5")), "lib_point"
+        SelfTest.AssertEq "anonymous enum", m.NameOf(m.ById("_8")), "lib_mode"
+        SelfTest.AssertEq "named struct keeps its name", m.NameOf(m.ById("_10")), "lib_named"
+        SelfTest.AssertEq "records", Names(m, m.Records()), "lib_point;lib_named;"
+        SelfTest.AssertEq "enumerations", Names(m, m.Enumerations()), "lib_mode;"
+    End Sub
+
+    Private Sub Opaque()
+        Dim m As CxModel = Basic()
+        SelfTest.AssertTrue "incomplete is opaque", m.IsOpaque(m.ById("_7"))
+        SelfTest.AssertTrue "complete is not", Not m.IsOpaque(m.ById("_10"))
+        SelfTest.AssertTrue "not among records", InStr(Names(m, m.Records()), "lib_handle") = 0
+    End Sub
+
+    Private Sub BitsToBytes()
+        Dim m As CxModel = Basic()
+        SelfTest.AssertEq "size", m.SizeBytes(m.ById("_5")), 8
+        SelfTest.AssertEq "align", m.AlignBytes(m.ById("_5")), 4
+        SelfTest.AssertEq "offset", m.OffsetBytes(m.ById("_31")), 4
+        SelfTest.AssertEq "pointer size", m.SizeBytes(m.ById("_21")), 8
+    End Sub
+
+    Private Sub StripWrappers()
+        Dim m As CxModel = Basic()
+        SelfTest.AssertEq "const char", m.Attr(m.Strip("_24"), "name"), "char"
+        SelfTest.AssertEq "elaborated struct", m.Attr(m.Strip("_22"), "id"), "_5"
+        SelfTest.AssertEq "plain type unchanged", m.Attr(m.Strip("_20"), "id"), "_20"
+    End Sub
+
+    Private Sub EllipsisAndComments()
+        Dim m As CxModel = Basic()
+        SelfTest.AssertTrue "variadic", m.HasEllipsis(m.ById("_4"))
+        SelfTest.AssertTrue "not variadic", Not m.HasEllipsis(m.ById("_3"))
+        SelfTest.AssertEq "comment found", m.Attr(m.CommentOf(m.ById("_3")), "id"), "c1"
+        SelfTest.AssertTrue "no comment", m.CommentOf(m.ById("_4")) Is Nothing
+    End Sub
+
+    Private Sub MissingFile()
+        Dim m As New CxModel
+        Dim message As String
+        Dim path As String = SelfTest.RepoRoot() & "\tests\testdata\model\no-such.xml"
+        On Error Resume Next
+        m.Load path, "C:\lib"
+        Dim raised As Boolean = (Err.Number <> 0)
+        On Error GoTo 0
+        message = m.LoadError
+        SelfTest.AssertTrue "raised", raised
+        SelfTest.AssertTrue "LoadError names the file", InStr(message, "no-such.xml") > 0, "message=[" & message & "]"
+    End Sub
+
+    Private Sub MalformedXml()
+        Dim m As New CxModel
+        Dim message As String
+        On Error Resume Next
+        m.Load SelfTest.RepoRoot() & "\tests\testdata\model\broken.xml", "C:\lib"
+        Dim raised As Boolean = (Err.Number <> 0)
+        On Error GoTo 0
+        message = m.LoadError
+        SelfTest.AssertTrue "raised", raised
+        SelfTest.AssertTrue "names the file", InStr(message, "broken.xml") > 0, "message=[" & message & "]"
+        SelfTest.AssertTrue "gives the line", InStr(message, "line 4") > 0, "message=[" & message & "]"
+    End Sub
+
+    ' D-051: every path to the fixture headers in a committed snapshot starts with {REPO}\, so the
+    ' snapshots work in any clone. (The Windows SDK paths in them are outside the header folder
+    ' and play no part.)
+    Private Sub SnapshotsHoldPlaceholder()
+        Dim files() As String
+        files = Split("tbfixture_x64.xml|tbfixture_x86.xml", "|")
+        Dim needle As String = "\tests\fixture-c\"
+        Dim f As Long
+        For f = 0 To UBound(files)
+            Dim text As String = FileSys.ReadTextUtf8(SelfTest.RepoRoot() & "\tests\testdata\fixture\" & files(f))
+            Dim found As Long = 0
+            Dim at As Long = InStr(1, text, needle, vbBinaryCompare)
+            Do While at > 0
+                found += 1
+                Dim before As String = Mid$(text, If(at > 6, at - 6, 1), If(at > 6, 6, at - 1))
+                SelfTest.AssertEq files(f) & ": text before occurrence " & found, before, "{REPO}"
+                at = InStr(at + 1, text, needle, vbBinaryCompare)
+            Loop
+            SelfTest.AssertTrue files(f) & " names the fixture headers", found > 0
+        Next
+    End Sub
+
+    Private Sub FixtureResolvesPlaceholder()
+        Dim root As String = SelfTest.RepoRoot()
+        Dim p As String = SelfTest.Fixture("tbfixture_x64.xml")
+        SelfTest.AssertTrue "the copy is not the committed file", p <> root & "\tests\testdata\fixture\tbfixture_x64.xml", p
+        SelfTest.AssertEq "a second call gives the same copy", SelfTest.Fixture("tbfixture_x64.xml"), p
+        Dim text As String = FileSys.ReadTextUtf8(p)
+        SelfTest.AssertEq "no placeholder left", InStr(text, "{REPO}"), 0
+        SelfTest.AssertTrue "the header path is this clone's", InStr(text, root & "\tests\fixture-c\tbfixture.h") > 0, root
+        SelfTest.AssertTrue "and that header exists", FileSys.KindOf(root & "\tests\fixture-c\tbfixture.h") = FileSys.KIND_FILE
+        Dim dump As String = "tbfixture_macros_x64.txt"
+        SelfTest.AssertTrue "a file without the placeholder is copied unchanged", _
+            FileSys.ReadTextUtf8(SelfTest.Fixture(dump)) = FileSys.ReadTextUtf8(root & "\tests\testdata\fixture\" & dump)
+    End Sub
+
+    ' ---- integration tests ------------------------------------------------------------
+
+    Private Sub FixtureCounts()
+        Dim o As New CliOptions
+        o.HeaderFolder = SelfTest.RepoRoot() & "\tests\fixture-c"
+        o.EntryHeader = "tbfixture.h"
+        o.CastXmlPath = SelfTest.RepoRoot() & "\CastXML\vcpkg_installed\x64-windows\tools\castxml\bin\castxml.exe"
+        Dim t As String = SelfTest.NewTempFolder()
+        Dim r As CastXmlResult = CastXmlRunner.RunCastXml(o, t)
+        SelfTest.AssertEq "castxml", r.ExitCode, 0
+        Dim m As New CxModel
+        m.Load r.Xml64Path, o.HeaderFolder
+        Dim fns As Long = m.Functions().Count
+        Dim recs As String = Names(m, m.Records())
+        Dim enums As Long = m.Enumerations().Count
+        FileSys.RemovePath t
+        SelfTest.AssertEq "functions", fns, 89
+        SelfTest.AssertEq "records", recs, "TBF_SCALARS;TBF_POINT;tbf_late;TBF_S4;TBF_S8;TBF_S16;TBF_S24;TBF_RECT;TBF_CALLBACKS;TBF_VALUE;TBF_TAGGED;TBF_ANON;TBF_FLAGS;TBF_PACKED1;TBF_PACKED2;TBF_ALIGNED;TBF_SIZED;tbf_closed;TBF_KEYWORDS;tbf_buf;TBF_LAYOUT_ENTRY;"
+        SelfTest.AssertEq "enums", enums, 3
+    End Sub
+
+    Private Sub LibGit2Counts()
+        ' D-050: generated here, not read from spike output (which a clean clone doesn't have).
+        Dim o As New CliOptions
+        o.HeaderFolder = SelfTest.RepoRoot() & "\libgit2\vcpkg_installed\x64-windows\include"
+        o.EntryHeader = "git2.h"
+        o.CastXmlPath = SelfTest.RepoRoot() & "\CastXML\vcpkg_installed\x64-windows\tools\castxml\bin\castxml.exe"
+        SelfTest.AssertTrue "libgit2 installed (cd libgit2 && vcpkg install --triplet x64-windows)", FileSys.KindOf(o.HeaderFolder & "\git2.h") = FileSys.KIND_FILE, o.HeaderFolder
+        Dim t As String = SelfTest.NewTempFolder()
+        Dim r As CastXmlResult = CastXmlRunner.RunCastXml(o, t)
+        SelfTest.AssertEq "castxml", r.ExitCode, 0
+        Dim m As New CxModel
+        m.Load r.Xml64Path, o.HeaderFolder
+        Dim fns As Long = m.Functions().Count
+        Dim recs As Long = m.Records().Count
+        Dim enums As Long = m.Enumerations().Count
+        Dim ms As Long = m.LoadMilliseconds
+        FileSys.RemovePath t
+        SelfTest.Info "libgit2 x64 XML loaded in " & ms & " ms"
+        SelfTest.AssertEq "functions", fns, 848
+        SelfTest.AssertEq "records", recs, 85
+        SelfTest.AssertEq "enums", enums, 84
+        SelfTest.AssertTrue "load under 10 s (D-013)", ms < 10000, ms & " ms"
+    End Sub
+End Module

@@ -1,0 +1,218 @@
+' Tests for the dependency checks (task 14.0, D-035): tbBlob --check, the bundled CastXML lookup,
+' and clear messages when a dependency is missing.
+Module Tests_Doctor
+    Public Const MODULE_ID As Long = 10
+
+    Public Sub Register()
+        SelfTest.Add "doctor: a CastXML bundled next to tbBlob.exe is found after --castxml and CASTXML, before PATH", MODULE_ID, 1
+        SelfTest.Add "doctor: castxml.exe not found is MISSING with its fix; the checks that need it say so", MODULE_ID, 2
+        SelfTest.Add "doctor: CastXML without its share folder has MISSING resource headers; with it they are OK", MODULE_ID, 3
+        SelfTest.Add "doctor: no vswhere / no Visual Studio with C++ tools is MISSING with what to install", MODULE_ID, 4
+        SelfTest.Add "doctor: castxml exit 0xC0000135 is explained as the missing MSVC runtime", MODULE_ID, 5
+        SelfTest.Add "doctor: the checklist prints OK / MISSING lines and the fixes", MODULE_ID, 6
+        SelfTest.Add "cli: --check needs no positional arguments", MODULE_ID, 7
+        SelfTest.Add "runner: CastXML without its resource headers exits 4 and names them", MODULE_ID, 8
+        SelfTest.Add "doctor: on this machine every dependency is OK, incl. the x86 and x64 compile probes", MODULE_ID, 9, True
+        SelfTest.Add "doctor: a castxml.exe that is not a valid program is reported without being run (no 'can't run on your PC' dialog)", MODULE_ID, 10
+        SelfTest.Add "runner: a castxml.exe that is not a valid program exits 4 without being run", MODULE_ID, 11
+    End Sub
+
+    Public Sub RunTest(ByVal index As Long)
+        Select Case index
+            Case 1: BundledLookup
+            Case 2: CastXmlMissing
+            Case 3: ResourceHeaders
+            Case 4: NoVisualStudio
+            Case 5: DllNotFoundExplained
+            Case 6: ChecklistFormat
+            Case 7: CheckOption
+            Case 8: RunWithoutResourceHeaders
+            Case 9: ThisMachine
+            Case 10: NotAProgram
+            Case 11: RunNotAProgram
+            Case Else: Err.Raise SelfTest.CHECK_FAILED, , "no test " & index & " in Tests_Doctor"
+        End Select
+    End Sub
+
+    ' ---- helpers ---------------------------------------------------------------
+
+    Private Sub Touch(ByVal path As String)
+        FileSys.MakeDirs FileSys.ParentOf(path)
+        FileSys.WriteTextUtf8 path, ""
+    End Sub
+
+    Private Function Check(checks As Collection, ByVal name As String) As DepCheck
+        Dim c As DepCheck
+        For Each c In checks
+            If c.Name = name Then Return c
+        Next
+        Err.Raise SelfTest.CHECK_FAILED, , "no check named '" & name & "'"
+    End Function
+
+    ' A fake Visual Studio folder with both vcvars scripts (empty files).
+    Private Function FakeVs(ByVal t As String) As String
+        Touch t & "\vs\VC\Auxiliary\Build\vcvars32.bat"
+        Touch t & "\vs\VC\Auxiliary\Build\vcvars64.bat"
+        Return t & "\vs"
+    End Function
+
+    ' ---- tests -----------------------------------------------------------------
+
+    Private Sub BundledLookup()
+        Dim t As String = SelfTest.NewTempFolder()
+        Touch t & "\exe\castxml\bin\castxml.exe"
+        Touch t & "\env\castxml.exe"
+        Touch t & "\path\castxml.exe"
+        Dim bundled As String = CastXmlRunner.FindCastXmlIn("", "", t & "\exe", t & "\path")
+        Dim envFirst As String = CastXmlRunner.FindCastXmlIn("", t & "\env\castxml.exe", t & "\exe", t & "\path")
+        Dim noBundle As String = CastXmlRunner.FindCastXmlIn("", "", t & "\nothing", t & "\path")
+        FileSys.RemovePath t
+        SelfTest.AssertEq "bundled before PATH", bundled, t & "\exe\castxml\bin\castxml.exe"
+        SelfTest.AssertEq "CASTXML before bundled", envFirst, t & "\env\castxml.exe"
+        SelfTest.AssertEq "no bundle: PATH", noBundle, t & "\path\castxml.exe"
+    End Sub
+
+    Private Sub CastXmlMissing()
+        Dim t As String = SelfTest.NewTempFolder()
+        Dim o As New CliOptions
+        o.CastXmlPath = t & "\nowhere\castxml.exe"
+        Dim checks As Collection = Doctor.CheckEnvironment(o, t, t & "\no-vswhere.exe", FakeVs(t))
+        FileSys.RemovePath t
+        Dim c As DepCheck = Check(checks, "castxml.exe")
+        SelfTest.AssertTrue "MISSING", Not c.Ok
+        SelfTest.AssertTrue "names what it looked for", InStr(c.Detail, "nowhere\castxml.exe") > 0, c.Detail
+        SelfTest.AssertTrue "fix says how to get it", InStr(c.Fix, "--castxml") > 0 And InStr(c.Fix, "CASTXML") > 0, c.Fix
+        SelfTest.AssertTrue "dependent check not run: SKIPPED, not MISSING", Not Check(checks, "castxml.exe starts").Ok And Check(checks, "castxml.exe starts").Skipped
+        SelfTest.AssertTrue "the missing one itself is not SKIPPED", Not c.Skipped
+        SelfTest.AssertTrue "every check reported", checks.Count = 9, "count " & checks.Count
+    End Sub
+
+    Private Sub ResourceHeaders()
+        Dim t As String = SelfTest.NewTempFolder()
+        Touch t & "\cx\bin\castxml.exe"
+        Dim o As New CliOptions
+        o.CastXmlPath = t & "\cx\bin\castxml.exe"
+        Dim without As DepCheck = Check(Doctor.CheckEnvironment(o, t, t & "\no-vswhere.exe", FakeVs(t)), "CastXML resource headers")
+        Touch t & "\cx\share\castxml\clang\include\stddef.h"
+        Dim withIt As DepCheck = Check(Doctor.CheckEnvironment(o, t, t & "\no-vswhere.exe", FakeVs(t)), "CastXML resource headers")
+        FileSys.RemovePath t
+        SelfTest.AssertTrue "without share: MISSING", Not without.Ok
+        SelfTest.AssertTrue "names the folder", InStr(without.Detail, "share\castxml\clang\include") > 0, without.Detail
+        SelfTest.AssertTrue "fix: copy the whole CastXML folder", InStr(without.Fix, "share") > 0, without.Fix
+        SelfTest.AssertTrue "with share: OK", withIt.Ok, withIt.Detail
+    End Sub
+
+    Private Sub NoVisualStudio()
+        Dim t As String = SelfTest.NewTempFolder()
+        Dim o As New CliOptions
+        o.CastXmlPath = t & "\nowhere\castxml.exe"
+        Dim checks As Collection = Doctor.CheckEnvironment(o, t, t & "\no-vswhere.exe", t & "\no-vs")
+        FileSys.RemovePath t
+        Dim w As DepCheck = Check(checks, "vswhere.exe")
+        SelfTest.AssertTrue "vswhere MISSING", Not w.Ok
+        SelfTest.AssertTrue "vswhere fix", InStr(w.Fix, "Build Tools") > 0, w.Fix
+        Dim vs As DepCheck = Check(checks, "Visual Studio with C++ tools")
+        SelfTest.AssertTrue "VS MISSING", Not vs.Ok
+        SelfTest.AssertTrue "VS fix names the workload", InStr(vs.Fix, "Desktop development with C++") > 0, vs.Fix
+        SelfTest.AssertTrue "vcvars MISSING", Not Check(checks, "vcvars32.bat / vcvars64.bat").Ok
+        SelfTest.AssertTrue "probes not run", InStr(Check(checks, "compile probe x64").Detail, "not checked") > 0, Check(checks, "compile probe x64").Detail
+    End Sub
+
+    Private Sub DllNotFoundExplained()
+        SelfTest.AssertTrue "0xC0000135", InStr(CastXmlRunner.ExplainExit(&HC0000135), "Visual C++ Redistributable") > 0, CastXmlRunner.ExplainExit(&HC0000135)
+        SelfTest.AssertEq "other codes: nothing to add", CastXmlRunner.ExplainExit(1), ""
+    End Sub
+
+    Private Sub ChecklistFormat()
+        Dim checks As New Collection
+        Dim a As New DepCheck
+        a.Name = "castxml.exe": a.Ok = True: a.Detail = "C:\cx\castxml.exe"
+        checks.Add a
+        Dim b As New DepCheck
+        b.Name = "vswhere.exe": b.Ok = False: b.Detail = "C:\vs\vswhere.exe not found": b.Fix = "Install the Build Tools."
+        checks.Add b
+        Dim s As String = Doctor.FormatChecks(checks)
+        SelfTest.AssertTrue "OK line", InStr(s, "OK       castxml.exe") > 0, s
+        SelfTest.AssertTrue "MISSING line", InStr(s, "MISSING  vswhere.exe") > 0, s
+        SelfTest.AssertTrue "fix under it", InStr(s, "C:\vs\vswhere.exe not found" & vbLf & "         fix: Install the Build Tools.") > 0, s
+        SelfTest.AssertTrue "summary", InStr(s, "1 missing -- out of 2 checks") > 0, s
+        Dim cs As New DepCheck
+        cs.Name = "compile probe x64": cs.Skipped = True: cs.Detail = "not checked: needs castxml.exe"
+        checks.Add cs
+        Dim s2 As String = Doctor.FormatChecks(checks)
+        SelfTest.AssertTrue "SKIPPED line", InStr(s2, "SKIPPED  compile probe x64") > 0, s2
+        SelfTest.AssertTrue "summary counts skipped apart", InStr(s2, "1 missing, 1 not checked because of them -- out of 3 checks") > 0, s2
+        SelfTest.AssertTrue "AllOk", Not Doctor.AllOk(checks)
+    End Sub
+
+    Private Sub CheckOption()
+        Dim o As New CliOptions
+        Dim a() As String = Split("--check", "|")
+        SelfTest.AssertEq "parses", o.Parse(a), ""
+        SelfTest.AssertTrue "flag", o.Check
+        Dim o2 As New CliOptions
+        Dim b() As String = Split("--check|--castxml|C:\cx\castxml.exe", "|")
+        SelfTest.AssertEq "with --castxml", o2.Parse(b), ""
+        SelfTest.AssertEq "castxml kept", o2.CastXmlPath, "C:\cx\castxml.exe"
+    End Sub
+
+    Private Sub RunWithoutResourceHeaders()
+        Dim t As String = SelfTest.NewTempFolder()
+        Touch t & "\cx\bin\castxml.exe"
+        Dim o As New CliOptions
+        o.HeaderFolder = "C:\h"
+        o.EntryHeader = "a.h"
+        o.CastXmlPath = t & "\cx\bin\castxml.exe"
+        Dim r As CastXmlResult = CastXmlRunner.RunCastXml(o, t & "\work", FakeVs(t))
+        FileSys.RemovePath t
+        SelfTest.AssertEq "exit code", r.ExitCode, MainModule.EXIT_TOOL_NOT_FOUND
+        SelfTest.AssertTrue "names the resource headers", InStr(r.ErrorText, "share\castxml\clang\include") > 0, r.ErrorText
+        SelfTest.AssertTrue "points at --check", InStr(r.ErrorText, "tbBlob --check") > 0, r.ErrorText
+    End Sub
+
+    ' The placeholder castxml.exe files above are empty: running one makes Windows show "This app
+    ' can't run on your PC". tbBlob must recognise them as not programs and never run them.
+    Private Sub NotAProgram()
+        Dim t As String = SelfTest.NewTempFolder()
+        Touch t & "\cx\bin\castxml.exe"
+        Touch t & "\cx\share\castxml\clang\include\stddef.h"
+        Dim o As New CliOptions
+        o.CastXmlPath = t & "\cx\bin\castxml.exe"
+        Dim checks As Collection = Doctor.CheckEnvironment(o, t, t & "\no-vswhere.exe", FakeVs(t))
+        Dim real As Boolean = CastXmlRunner.LooksLikeProgram(SelfTest.RepoRoot() & "\CastXML\vcpkg_installed\x64-windows\tools\castxml\bin\castxml.exe")
+        Dim fake As Boolean = CastXmlRunner.LooksLikeProgram(t & "\cx\bin\castxml.exe")
+        FileSys.RemovePath t
+        Dim c As DepCheck = Check(checks, "castxml.exe starts")
+        SelfTest.AssertTrue "MISSING, not run", Not c.Ok And Not c.Skipped
+        SelfTest.AssertTrue "says why", InStr(c.Detail, "not a valid program") > 0, c.Detail
+        SelfTest.AssertTrue "probes skipped when castxml does not start", Check(checks, "compile probe x86").Skipped And Check(checks, "compile probe x64").Skipped
+        SelfTest.AssertTrue "a real castxml.exe looks like a program", real
+        SelfTest.AssertTrue "an empty file does not", Not fake
+    End Sub
+
+    Private Sub RunNotAProgram()
+        Dim t As String = SelfTest.NewTempFolder()
+        Touch t & "\cx\bin\castxml.exe"
+        Touch t & "\cx\share\castxml\clang\include\stddef.h"
+        Dim o As New CliOptions
+        o.HeaderFolder = "C:\h"
+        o.EntryHeader = "a.h"
+        o.CastXmlPath = t & "\cx\bin\castxml.exe"
+        Dim r As CastXmlResult = CastXmlRunner.RunCastXml(o, t & "\work", FakeVs(t))
+        FileSys.RemovePath t
+        SelfTest.AssertEq "exit code", r.ExitCode, MainModule.EXIT_TOOL_NOT_FOUND
+        SelfTest.AssertTrue "says it is not a valid program", InStr(r.ErrorText, "not a valid program") > 0, r.ErrorText
+    End Sub
+
+    Private Sub ThisMachine()
+        Dim o As New CliOptions
+        o.CastXmlPath = SelfTest.RepoRoot() & "\CastXML\vcpkg_installed\x64-windows\tools\castxml\bin\castxml.exe"
+        Dim checks As Collection = Doctor.CheckEnvironment(o, App.Path, Doctor.VswherePath(), "")
+        Dim s As String = Doctor.FormatChecks(checks)
+        SelfTest.Info s
+        SelfTest.AssertTrue "all OK", Doctor.AllOk(checks), s
+        SelfTest.AssertTrue "x86 probe", Check(checks, "compile probe x86").Ok, Check(checks, "compile probe x86").Detail
+        SelfTest.AssertTrue "x64 probe", Check(checks, "compile probe x64").Ok, Check(checks, "compile probe x64").Detail
+        SelfTest.AssertTrue "castxml version shown", InStr(Check(checks, "castxml.exe starts").Detail, "castxml version") > 0, Check(checks, "castxml.exe starts").Detail
+    End Sub
+End Module

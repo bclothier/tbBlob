@@ -1,0 +1,56 @@
+' Writes one line per check to tests\harness-fixture\results\results-<arch>.txt, flushed per
+' line so a crash still leaves every line before it. Lines: PASS/FAIL/INFO <name> | <detail>.
+Module Results
+    Private mPath As String
+    Public Passed As Long
+    Public Failed As Long
+
+    Public Function Arch() As String
+        #If Win64 Then
+            Return "win64"
+        #Else
+            Return "win32"
+        #End If
+    End Function
+
+    ' The harness folder (the EXE is in <harness>\Build).
+    Public Function HarnessDir() As String
+        Dim p As String = App.Path
+        If Right$(p, 1) = "\" Then p = Left$(p, Len(p) - 1)
+        Return Left$(p, InStrRev(p, "\") - 1)
+    End Function
+
+    Public Sub Start()
+        Dim dirPath As String = HarnessDir() & "\results"
+        If Len(Dir$(dirPath, vbDirectory)) = 0 Then MkDir dirPath
+        mPath = dirPath & "\results-" & Arch() & ".txt"
+        Dim f As Integer = FreeFile
+        Open mPath For Output As #f
+        Close #f
+    End Sub
+
+    Private Sub WriteLine(ByVal text As String)
+        Dim f As Integer = FreeFile
+        Open mPath For Append As #f
+        Print #f, text
+        Close #f
+        Debug.Print text
+    End Sub
+
+    Public Sub Check(ByVal name As String, ByVal ok As Boolean, Optional ByVal detail As String = "")
+        If ok Then Passed += 1 Else Failed += 1
+        WriteLine If(ok, "PASS ", "FAIL ") & name & If(Len(detail) > 0, " | " & detail, "")
+    End Sub
+
+    Public Sub CheckEq(ByVal name As String, ByVal actual As Variant, ByVal expected As Variant)
+        Check name, CStr(actual) = CStr(expected), "actual=" & CStr(actual) & " expected=" & CStr(expected)
+    End Sub
+
+    Public Sub Info(ByVal name As String, ByVal detail As String)
+        WriteLine "INFO " & name & " | " & detail
+    End Sub
+
+    Public Sub Fail(ByVal name As String, ByVal detail As String)
+        Check name, False, detail
+    End Sub
+End Module

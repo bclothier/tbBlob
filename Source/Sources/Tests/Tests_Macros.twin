@@ -1,0 +1,234 @@
+' Tests for MacroTable (task 7.0, D-020): which macros are the library's, evaluation, and the tB
+' constant text. Data: tests\testdata\macros (hand-written) and the tbfixture snapshot.
+Module Tests_Macros
+    Public Const MODULE_ID As Long = 6
+
+    Public Sub Register()
+        SelfTest.Add "macros: library macros are the header folder's #defines that the dump defines", MODULE_ID, 1
+        SelfTest.Add "macros: each library macro knows its header", MODULE_ID, 2
+        SelfTest.Add "macros: bodies come from the dump", MODULE_ID, 3
+        SelfTest.Add "macros: integers, chars, strings, doubles and expressions become tB constants", MODULE_ID, 4
+        SelfTest.Add "macros: top-bit and 64-bit values use bit patterns and ^", MODULE_ID, 5
+        SelfTest.Add "macros: what cannot be a constant is skipped with a reason", MODULE_ID, 6
+        SelfTest.Add "macros: the tbfixture macros evaluate as the header documents", MODULE_ID, 7
+        SelfTest.Add "macros: references to enum values evaluate once the model's enums are added", MODULE_ID, 8
+        SelfTest.Add "macros: without the model, an enum reference is an unknown identifier", MODULE_ID, 9
+        SelfTest.Add "macros: MSVC sized integer suffixes (i8..i64, ui8..ui64) are understood", MODULE_ID, 10
+        SelfTest.Add "macros: a macro that names a type is a type alias, not a constant (D-025)", MODULE_ID, 11
+        SelfTest.Add "macros: the fixture's type-alias macros name their types", MODULE_ID, 12
+        SelfTest.Add "macros: the x86 and x64 dumps evaluate architecture-dependent macros differently (D-030)", MODULE_ID, 13
+        SelfTest.Add "macros: names differing only in case are distinct; a redefinition keeps the last body (pins D-040)", MODULE_ID, 14
+    End Sub
+
+    Public Sub RunTest(ByVal index As Long)
+        Select Case index
+            Case 1: LibraryNames
+            Case 2: Headers
+            Case 3: Bodies
+            Case 4: Constants
+            Case 5: BitPatterns
+            Case 6: Skips
+            Case 7: Fixture
+            Case 8: EnumReferences
+            Case 9: EnumReferencesNeedModel
+            Case 10: MsvcSuffixes
+            Case 11: TypeAliasMacro
+            Case 12: FixtureTypeAliasMacros
+            Case 13: ArchDumps
+            Case 14: CaseAndRedefinition
+            Case Else: Err.Raise SelfTest.CHECK_FAILED, , "no test " & index & " in Tests_Macros"
+        End Select
+    End Sub
+
+    ' ---- helpers ---------------------------------------------------------------
+
+    Private Function Table() As MacroTable
+        Dim t As New MacroTable
+        t.ParseDump FileSys.ReadTextUtf8(SelfTest.RepoRoot() & "\tests\testdata\macros\dump.txt")
+        t.ScanLibrary SelfTest.RepoRoot() & "\tests\testdata\macros\include"
+        Return t
+    End Function
+
+    Private Function Joined(c As Collection) As String
+        Dim v As Variant, s As String
+        For Each v In c
+            s &= v & ";"
+        Next
+        Return s
+    End Function
+
+    Private Function Tail(t As MacroTable, ByVal name As String) As String
+        Return t.TbConstTail(t.Evaluate(name))
+    End Function
+
+    ' ---- tests -----------------------------------------------------------------------
+
+    Private Sub LibraryNames()
+        SelfTest.AssertEq "names", Joined(Table().LibraryNames()), _
+            "LIB_H;LIB_DEC;LIB_HEX;LIB_OCT;LIB_U;LIB_LL;LIB_TOP;LIB_ALL;LIB_SHIFT;LIB_EXPR;LIB_NEG;LIB_NOT;LIB_REF;" & _
+            "LIB_CHAR;LIB_CHAR_ESC;LIB_STR;LIB_STR_CTRL;LIB_DBL;LIB_INIT;LIB_FN;LIB_CYC_A;LIB_CYC_B;LIB_USES_SYS;" & _
+            "LIB_UNKNOWN;LIB_CAST;LIB_MIXED;LIB_PREC;LIB_I64;LIB_I64_MIN;LIB_UI32;LIB_I8;LIB_UI64;LIB_TYPE_ALIAS;SUB_ONE;"
+    End Sub
+
+    Private Sub Headers()
+        Dim t As MacroTable = Table()
+        SelfTest.AssertTrue "lib.h", LCase$(Right$(t.HeaderOf("LIB_DEC"), 6)) = "\lib.h", t.HeaderOf("LIB_DEC")
+        SelfTest.AssertTrue "sub\one.h", LCase$(Right$(t.HeaderOf("SUB_ONE"), 10)) = "\sub\one.h", t.HeaderOf("SUB_ONE")
+        SelfTest.AssertEq "not the library's", t.HeaderOf("SYS_MACRO"), ""
+    End Sub
+
+    Private Sub Bodies()
+        Dim t As MacroTable = Table()
+        SelfTest.AssertEq "expression", t.Body("LIB_EXPR"), "(LIB_DEC * 2 + 1)"
+        SelfTest.AssertEq "empty", t.Body("LIB_H"), ""
+        SelfTest.AssertEq "system macro still known", t.Body("_MSC_VER"), "1944"
+    End Sub
+
+    Private Sub Constants()
+        Dim t As MacroTable = Table()
+        SelfTest.AssertEq "decimal", Tail(t, "LIB_DEC"), "As Long = 42"
+        SelfTest.AssertEq "hex", Tail(t, "LIB_HEX"), "As Long = 127"
+        SelfTest.AssertEq "octal", Tail(t, "LIB_OCT"), "As Long = 15"
+        SelfTest.AssertEq "unsigned suffix", Tail(t, "LIB_U"), "As Long = 42"
+        SelfTest.AssertEq "expression", Tail(t, "LIB_EXPR"), "As Long = 85"
+        SelfTest.AssertEq "negative", Tail(t, "LIB_NEG"), "As Long = -5"
+        SelfTest.AssertEq "reference", Tail(t, "LIB_REF"), "As Long = 127"
+        SelfTest.AssertEq "char", Tail(t, "LIB_CHAR"), "As Long = 59"
+        SelfTest.AssertEq "escaped char", Tail(t, "LIB_CHAR_ESC"), "As Long = 10"
+        SelfTest.AssertEq "string with escaped quotes", Tail(t, "LIB_STR"), "As String = ""tb""""fixture"""""""
+        SelfTest.AssertEq "double", Tail(t, "LIB_DBL"), "As Double = 2.5"
+        SelfTest.AssertEq "system macro reference", Tail(t, "LIB_USES_SYS"), "As Long = 1944"
+        SelfTest.AssertEq "precedence", Tail(t, "LIB_PREC"), "As Long = 11"
+        SelfTest.AssertEq "subfolder header", Tail(t, "SUB_ONE"), "As Long = 1"
+    End Sub
+
+    Private Sub BitPatterns()
+        Dim t As MacroTable = Table()
+        SelfTest.AssertEq "0x80000000u", Tail(t, "LIB_TOP"), "As Long = &H80000000"
+        SelfTest.AssertEq "0xFFFFFFFFu", Tail(t, "LIB_ALL"), "As Long = &HFFFFFFFF"
+        SelfTest.AssertEq "1u << 31", Tail(t, "LIB_SHIFT"), "As Long = &H80000000"
+        SelfTest.AssertEq "~0u", Tail(t, "LIB_NOT"), "As Long = &HFFFFFFFF"
+        SelfTest.AssertEq "(int)0x80000000u", Tail(t, "LIB_CAST"), "As Long = &H80000000"
+        SelfTest.AssertEq "LL", Tail(t, "LIB_LL"), "As LongLong = 1234567890123^"
+        SelfTest.AssertEq "LL + 1", Tail(t, "LIB_MIXED"), "As LongLong = 1234567890124^"
+        Dim v As MacroValue = t.Evaluate("LIB_TOP")
+        SelfTest.AssertEq "unsigned value kept", v.Bits & " " & v.IsUnsigned & " " & v.IntValue, "32 True 2147483648"
+        Set v = t.Evaluate("LIB_CAST")
+        SelfTest.AssertEq "cast to int", v.Bits & " " & v.IsUnsigned & " " & v.IntValue, "32 False -2147483648"
+    End Sub
+
+    Private Sub Skips()
+        Dim t As MacroTable = Table()
+        Dim cases As Variant = Array("LIB_H", "empty", "LIB_INIT", "initializer", "LIB_FN", "function-like", _
+            "LIB_CYC_A", "cyclic", "LIB_UNKNOWN", "unknown identifier NOT_DEFINED", "LIB_STR_CTRL", "escape")
+        Dim i As Long
+        For i = 0 To UBound(cases) Step 2
+            Dim v As MacroValue = t.Evaluate(cases(i))
+            SelfTest.AssertEq cases(i) & " kind", v.Kind, "skipped"
+            SelfTest.AssertTrue cases(i) & " reason", InStr(v.Reason, cases(i + 1)) > 0, "reason=[" & v.Reason & "]"
+            SelfTest.AssertEq cases(i) & " no constant", t.TbConstTail(v), ""
+        Next
+    End Sub
+
+    Private Sub Fixture()
+        Dim t As New MacroTable
+        t.ParseDump FileSys.ReadTextUtf8(SelfTest.RepoRoot() & "\tests\testdata\fixture\tbfixture_macros_x64.txt")
+        t.ScanLibrary SelfTest.RepoRoot() & "\tests\fixture-c"
+        SelfTest.AssertEq "library macro count (incl. TBF_DEF_API, D-026; arch macros, D-030)", t.LibraryNames().Count, 30
+        SelfTest.AssertEq "TBF_VERSION_MAJOR", Tail(t, "TBF_VERSION_MAJOR"), "As Long = 1"
+        SelfTest.AssertEq "TBF_OCTAL", Tail(t, "TBF_OCTAL"), "As Long = 15"
+        SelfTest.AssertEq "TBF_LONGLONG", Tail(t, "TBF_LONGLONG"), "As LongLong = 1234567890123^"
+        SelfTest.AssertEq "TBF_TOPBIT", Tail(t, "TBF_TOPBIT"), "As Long = &H80000000"
+        SelfTest.AssertEq "TBF_SHIFT", Tail(t, "TBF_SHIFT"), "As Long = &H80000000"
+        SelfTest.AssertEq "TBF_EXPR", Tail(t, "TBF_EXPR"), "As Long = 3"
+        SelfTest.AssertEq "TBF_REF", Tail(t, "TBF_REF"), "As Long = 127"
+        SelfTest.AssertEq "TBF_CHAR_ESC", Tail(t, "TBF_CHAR_ESC"), "As Long = 10"
+        SelfTest.AssertEq "TBF_STRING", Tail(t, "TBF_STRING"), "As String = ""tb""""fixture"""""""
+        SelfTest.AssertEq "TBF_INIT", t.Evaluate("TBF_INIT").Kind, "skipped"
+        SelfTest.AssertEq "TBF_TWICE", t.Evaluate("TBF_TWICE").Kind, "skipped"
+        SelfTest.AssertEq "TBF_CYCLE_A", t.Evaluate("TBF_CYCLE_A").Kind, "skipped"
+    End Sub
+
+    Private Function FixtureTable(ByVal withModel As Boolean) As MacroTable
+        Dim t As New MacroTable
+        t.ParseDump FileSys.ReadTextUtf8(SelfTest.RepoRoot() & "\tests\testdata\fixture\tbfixture_macros_x64.txt")
+        t.ScanLibrary SelfTest.RepoRoot() & "\tests\fixture-c"
+        If withModel Then
+            Dim m As New CxModel
+            m.Load SelfTest.Fixture("tbfixture_x64.xml"), SelfTest.RepoRoot() & "\tests\fixture-c"
+            t.AddEnumValues m
+        End If
+        Return t
+    End Function
+
+    Private Sub EnumReferences()
+        Dim t As MacroTable = FixtureTable(True)
+        SelfTest.AssertEq "enum value + 1", Tail(t, "TBF_COLOR_BLUE_NEXT"), "As Long = 6"
+        SelfTest.AssertEq "negative enum value", Tail(t, "TBF_COLOR_RED_ALIAS"), "As Long = -1"
+        ' signed int 0x80000001 = -2147483647: inside the signed range, so decimal (hex is only for
+        ' values a signed Long cannot write in decimal; see BitPatterns)
+        SelfTest.AssertEq "top-bit enum value in an OR", Tail(t, "TBF_FLAGS_ALL"), "As Long = -2147483647"
+        Dim v As MacroValue = t.Evaluate("TBF_COLOR_RED_ALIAS")
+        SelfTest.AssertEq "enum values are signed 32-bit ints", v.Bits & " " & v.IsUnsigned & " " & v.IntValue, "32 False -1"
+    End Sub
+
+    ' libgit2's own stdint.h writes INT64_MAX etc. with MSVC suffixes (found by its report, task 10)
+    Private Sub MsvcSuffixes()
+        Dim t As MacroTable = Table()
+        SelfTest.AssertEq "i64", Tail(t, "LIB_I64"), "As LongLong = 9223372036854775807^"
+        SelfTest.AssertEq "INT64_MIN as hex (-9223372036854775808^ is not a valid tB literal)", Tail(t, "LIB_I64_MIN"), "As LongLong = &H8000000000000000^"
+        SelfTest.AssertEq "ui32", Tail(t, "LIB_UI32"), "As Long = &HFFFFFFFF"
+        SelfTest.AssertEq "i8", Tail(t, "LIB_I8"), "As Long = 127"
+        SelfTest.AssertEq "ui64 (all bits)", Tail(t, "LIB_UI64"), "As LongLong = -1^"
+        Dim v As MacroValue = t.Evaluate("LIB_UI64")
+        SelfTest.AssertEq "ui64 is unsigned 64-bit", v.Bits & " " & v.IsUnsigned, "64 True"
+    End Sub
+
+    Private Sub CaseAndRedefinition()
+        Dim t As New MacroTable
+        t.ParseDump "#define CASE_A 1" & vbLf & "#define case_a 2" & vbLf & "#define REDEF 3" & vbLf & "#define REDEF 4" & vbLf
+        SelfTest.AssertEq "upper", t.Body("CASE_A"), "1"
+        SelfTest.AssertEq "lower", t.Body("case_a"), "2"
+        SelfTest.AssertEq "mixed is unknown", t.Body("Case_A"), ""
+        SelfTest.AssertEq "redefinition: last body wins", t.Body("REDEF"), "4"
+    End Sub
+
+    Private Sub ArchDumps()
+        Dim root As String = SelfTest.RepoRoot()
+        Dim t64 As New MacroTable
+        t64.ParseDump FileSys.ReadTextUtf8(root & "\tests\testdata\fixture\tbfixture_macros_x64.txt")
+        t64.ScanLibrary root & "\tests\fixture-c"
+        Dim t86 As New MacroTable
+        t86.ParseDump FileSys.ReadTextUtf8(root & "\tests\testdata\fixture\tbfixture_macros_x86.txt")
+        t86.ScanLibrary root & "\tests\fixture-c"
+        SelfTest.AssertEq "TBF_ARCH_BITS x64", Tail(t64, "TBF_ARCH_BITS"), "As Long = 64"
+        SelfTest.AssertEq "TBF_ARCH_BITS x86", Tail(t86, "TBF_ARCH_BITS"), "As Long = 32"
+        SelfTest.AssertEq "TBF_SIZE_MAX x64", Tail(t64, "TBF_SIZE_MAX"), "As LongLong = -1^"
+        SelfTest.AssertEq "TBF_SIZE_MAX x86", Tail(t86, "TBF_SIZE_MAX"), "As Long = &HFFFFFFFF"
+        SelfTest.AssertEq "TBF_SIZE_MAX_ALIAS x86 (through a reference)", Tail(t86, "TBF_SIZE_MAX_ALIAS"), "As Long = &HFFFFFFFF"
+        SelfTest.AssertTrue "TBF_X86_ONLY is an x86 library macro", Joined(t86.LibraryNames()) Like "*;TBF_X86_ONLY;*"
+        SelfTest.AssertTrue "TBF_X86_ONLY is not an x64 library macro", Not (Joined(t64.LibraryNames()) Like "*;TBF_X86_ONLY;*")
+    End Sub
+
+    Private Sub TypeAliasMacro()
+        Dim t As MacroTable = Table()
+        t.AddTypeName "lib_handle_t"
+        Dim v As MacroValue = t.Evaluate("LIB_TYPE_ALIAS")
+        SelfTest.AssertEq "kind", v.Kind, "typealias"
+        SelfTest.AssertEq "target", v.StrValue, "lib_handle_t"
+        SelfTest.AssertEq "not a constant", t.TbConstTail(v), ""
+    End Sub
+
+    Private Sub FixtureTypeAliasMacros()
+        Dim t As MacroTable = FixtureTable(True)
+        SelfTest.AssertEq "struct", t.Evaluate("TBF_POINT_MACRO_ALIAS").Kind & " " & t.Evaluate("TBF_POINT_MACRO_ALIAS").StrValue, "typealias TBF_POINT"
+        SelfTest.AssertEq "enum", t.Evaluate("TBF_COLOR_MACRO_ALIAS").Kind & " " & t.Evaluate("TBF_COLOR_MACRO_ALIAS").StrValue, "typealias TBF_COLOR"
+    End Sub
+
+    Private Sub EnumReferencesNeedModel()
+        Dim t As MacroTable = FixtureTable(False)
+        Dim v As MacroValue = t.Evaluate("TBF_COLOR_BLUE_NEXT")
+        SelfTest.AssertEq "kind", v.Kind, "skipped"
+        SelfTest.AssertTrue "reason", InStr(v.Reason, "unknown identifier TBF_BLUE") > 0, "reason=[" & v.Reason & "]"
+    End Sub
+End Module

@@ -1,0 +1,467 @@
+' Runtime checks of the libgit2 1.9.1 bindings that tbBlob generated (task 12, PRD req. 33-38).
+' Each group runs under its own error handler, so an error is a FAIL line, not the end of the run.
+' Contracts checked against the libgit2 reference (https://libgit2.org/docs/reference/main/) and the
+' 1.9.1 headers. Results.twin and Utf8.twin are shared with tests\harness-fixture.
+Module Harness
+    Private Declare PtrSafe Function GetModuleFileNameW Lib "kernel32" (ByVal hModule As LongPtr, ByVal lpFilename As LongPtr, ByVal nSize As Long) As Long
+    Private Declare PtrSafe Function GetModuleHandleW Lib "kernel32" (ByVal lpModuleName As LongPtr) As LongPtr
+    Private Declare PtrSafe Function GetLongPathNameW Lib "kernel32" (ByVal lpszShortPath As LongPtr, ByVal lpszLongPath As LongPtr, ByVal cchBuffer As Long) As Long
+    Private Const GROUPS As Long = 6
+    #If Win64 Then
+        Private Const VCPKG_BIN As String = "\libgit2\vcpkg_installed\x64-windows\bin"
+    #Else
+        Private Const VCPKG_BIN As String = "\libgit2\vcpkg_installed_x86\x86-windows\bin"
+    #End If
+
+    Private mWork As String         ' this run's scratch folder (non-ASCII, under %TEMP%)
+    Private mCheckoutCalls As Long
+    Private mCheckoutTotal As LongPtr
+    Private mCheckoutPath As String
+    Private mCheckoutPayload As LongPtr
+    Private mTransferCalls As Long
+    Private mTransferTotal As Long
+    Private mTransferReceived As Long
+    Private mTransferPayload As LongPtr
+    Private mRefNames As String
+    Private mRefPayload As LongPtr
+    Private mRefCalls As Long
+
+    Public Sub Main()
+        Results.Start
+        Dim p As LongPtr
+        Results.Info "0.arch", Results.Arch() & " LenB(LongPtr)=" & LenB(p)
+        If Not Boundary() Then
+            Results.Info "0.summary", "passed=" & Results.Passed & " failed=" & Results.Failed
+            Exit Sub
+        End If
+        mWork = Environ$("TEMP") & "\tbBlob-harness-" & ChrW$(&HE9)
+        If Len(Dir$(mWork, vbDirectory)) = 0 Then MkDir mWork
+        mWork = mWork & "\" & Results.Arch() & "-" & Format$(Now, "yyyymmddhhnnss")
+        MkDir mWork
+        Results.Info "0.work", mWork
+        Dim g As Long
+        For g = 1 To GROUPS
+            RunGroup g
+        Next
+        Results.CheckEq "0.libgit2_shutdown balances init (0 left)", git_libgit2_shutdown(), 0
+        Results.Info "0.summary", "passed=" & Results.Passed & " failed=" & Results.Failed
+    End Sub
+
+    Private Sub RunGroup(ByVal g As Long)
+        On Error GoTo failed
+        Select Case g
+            Case 1: Layout
+            Case 2: Errors
+            Case 3: Options
+            Case 4: LocalScenario
+            Case 5: FixtureRepo
+            Case 6: CloneWithCallbacks
+        End Select
+        Exit Sub
+    failed:
+        Results.Fail "group " & g & " raised an error", Err.Number & ": " & Err.Description
+    End Sub
+
+    ' ---- helpers ------------------------------------------------------------------------------
+    Private Function RepoRoot() As String
+        Dim p As String = Results.HarnessDir()      ' <repo>\tests\harness-libgit2
+        p = Left$(p, InStrRev(p, "\") - 1)
+        Return Left$(p, InStrRev(p, "\") - 1)
+    End Function
+
+    Private Function ModulePath(ByVal h As LongPtr) As String
+        Dim buf As String = String$(1024, vbNullChar)
+        Dim n As Long = GetModuleFileNameW(h, StrPtr(buf), 1024)
+        Return Left$(buf, n)
+    End Function
+
+    ' D-004: compare paths by their long names (%TEMP% can be an 8.3 short path).
+    Private Function LongPath(ByVal p As String) As String
+        p = Replace(p, "/", "\")
+        Do While Len(p) > 3 And Right$(p, 1) = "\"
+            p = Left$(p, Len(p) - 1)
+        Loop
+        Dim buf As String = String$(1024, vbNullChar)
+        Dim n As Long = GetLongPathNameW(StrPtr(p), StrPtr(buf), 1024)
+        If n > 0 And n < 1024 Then p = Left$(buf, n)
+        Return LCase$(p)
+    End Function
+
+    Private Function SamePath(ByVal a As String, ByVal b As String) As Boolean
+        Return LongPath(a) = LongPath(b)
+    End Function
+
+    Private Function OidHex(ByRef id As git_oid) As String
+        Dim buf(0 To 40) As Byte
+        git_oid_fmt VarPtr(buf(0)), id
+        Return FromUtf8(VarPtr(buf(0)))
+    End Function
+
+    Private Function LastGitError() As String
+        Dim p As LongPtr = git_error_last()
+        If p = 0 Then Return "(git_error_last returned NULL)"
+        With CType(Of git_error)(p)
+            Return "klass=" & .klass & " message=" & FromUtf8(.message)
+        End With
+    End Function
+
+    Private Function Detail(ByVal rc As Long) As String
+        Return "rc=" & rc & If(rc <> 0, " " & LastGitError(), "")
+    End Function
+
+    Private Sub WriteFile(ByVal path As String, ByVal text As String)
+        Dim f As Integer = FreeFile
+        Open path For Output As #f
+        Print #f, text
+        Close #f
+    End Sub
+
+    Private Function LoadGit2(ByVal path As String, ByRef msg As String) As LongPtr
+        On Error GoTo failed
+        Return git2_Loader.LoadFile(path)
+    failed:
+        msg = Err.Number & ": " & Err.Description
+        Return 0
+    End Function
+
+    ' ---- 0. DLL boundary (task 12.3) ----------------------------------------------------------
+    Private Function Boundary() As Boolean
+        Results.Check "0.loader IsLoaded before LoadFile", Not git2_Loader.IsLoaded()
+        Dim bin As String = RepoRoot() & VCPKG_BIN
+        Dim msg As String
+        Dim h As LongPtr = LoadGit2(bin & "\git2.dll", msg)
+        Results.Check "0.loader LoadFile(vcpkg bin\git2.dll)", h <> 0, If(h = 0, msg, bin)
+        If h = 0 Then Return False
+        Results.Check "0.loaded git2.dll is this architecture's", LCase$(ModulePath(h)) = LCase$(bin & "\git2.dll"), ModulePath(h)
+        Results.Check "0.Lib ""git2.dll"" resolves to that module", GetModuleHandleW(StrPtr("git2.dll")) = h
+        Dim hz As LongPtr = GetModuleHandleW(StrPtr("zlib1.dll"))
+        Results.Check "0.dependency zlib1.dll loaded from the same folder", hz <> 0 And LCase$(ModulePath(hz)) = LCase$(bin & "\zlib1.dll"), If(hz = 0, "not loaded", ModulePath(hz))
+        Dim n As Long = git_libgit2_init()
+        Results.CheckEq "0.libgit2_init (first init returns 1)", n, 1
+        If n < 1 Then Return False
+        Dim major As Long, minor As Long, rev As Long
+        Results.CheckEq "0.libgit2_version rc", git_libgit2_version(major, minor, rev), 0
+        Results.CheckEq "0.libgit2_version", major & "." & minor & "." & rev, "1.9.1"
+        Return True
+    End Function
+
+    ' ---- 1. layout (PRD req. 34) --------------------------------------------------------------
+    Private Sub Layout()
+        Dim mismatches As String = git2_LayoutCheck.LayoutMismatches()
+        Results.Check "1.layout every generated Type matches CastXML", Len(mismatches) = 0, Replace(mismatches, vbLf, "; ")
+    End Sub
+
+    ' ---- 2. errors ----------------------------------------------------------------------------
+    Private Sub Errors()
+        Dim repo As git_repository
+        Dim missing() As Byte = ToUtf8(mWork & "\no-such-repo")
+        Dim rc As Long = git_repository_open(repo, VarPtr(missing(0)))
+        Results.CheckEq "2.open of a missing repo returns GIT_ENOTFOUND", rc, GIT_ENOTFOUND
+        Dim p As LongPtr = git_error_last()
+        Results.Check "2.error_last after the failure is not NULL", p <> 0
+        If p = 0 Then Exit Sub
+        With CType(Of git_error)(p)
+            Results.Check "2.error_last message (CType(Of git_error))", Len(FromUtf8(.message)) > 0, FromUtf8(.message)
+            Results.Check "2.error_last klass", .klass > 0, "klass=" & .klass
+        End With
+        ' git2/sys/errors.h, generated through --also (D-033): set, read back, clear
+        Dim mine() As Byte = ToUtf8("tbBlob sys check " & ChrW$(&HE9))
+        Results.CheckEq "2.sys error_set_str", git_error_set_str(GIT_ERROR_INVALID, VarPtr(mine(0))), 0
+        Results.CheckEq "2.sys error_last returns that message", LastGitError() = "klass=" & GIT_ERROR_INVALID & " message=tbBlob sys check " & ChrW$(&HE9), True
+        git_error_clear
+        Results.Check "2.sys error_clear clears it", InStr(LastGitError(), "tbBlob sys check") = 0, LastGitError()
+    End Sub
+
+    ' ---- 3. variadic options (D-006) ----------------------------------------------------------
+    Private Sub Options()
+        Dim want As LongPtr = 12345678
+        Results.CheckEq "3.opts SET_MWINDOW_SIZE (size_t by value)", git_libgit2_opts(GIT_OPT_SET_MWINDOW_SIZE, ByVal want), 0
+        Dim got As LongPtr
+        Results.CheckEq "3.opts GET_MWINDOW_SIZE (size_t* out)", git_libgit2_opts(GIT_OPT_GET_MWINDOW_SIZE, got), 0
+        Results.CheckEq "3.opts round trip", got, want
+        ' D-030: stdint constants whose value differs by architecture (VarType: vbLong = 3, vbLongLong = 20)
+        #If Win64 Then
+            Results.CheckEq "3.SIZE_MAX (x64: LongLong, all bits)", VarType(SIZE_MAX) & ":" & SIZE_MAX, vbLongLong & ":-1"
+            Results.CheckEq "3.INTPTR_MAX (x64)", CStr(INTPTR_MAX), "9223372036854775807"
+            Results.CheckEq "3.PTRDIFF_MIN (x64, through INTPTR_MIN)", CStr(PTRDIFF_MIN), "-9223372036854775808"
+        #Else
+            Results.CheckEq "3.SIZE_MAX (x86: Long, all bits)", VarType(SIZE_MAX) & ":" & SIZE_MAX, vbLong & ":-1"
+            Results.CheckEq "3.INTPTR_MAX (x86)", CStr(INTPTR_MAX), "2147483647"
+            Results.CheckEq "3.PTRDIFF_MIN (x86, through INTPTR_MIN)", CStr(PTRDIFF_MIN), "-2147483648"
+        #End If
+    End Sub
+
+    ' ---- 4. local scenario (PRD req. 35) ------------------------------------------------------
+    Private Sub LocalScenario()
+        Const AUTHOR_EMAIL As String = "zoe@example.com"
+        Dim author As String = "Zo" & ChrW$(&HEB) & " T" & ChrW$(&HEB) & "ster"
+        Dim dirPath As String = mWork & "\local"
+        Dim dirB() As Byte = ToUtf8(dirPath)
+        Dim repo As git_repository
+        Dim rc As Long = git_repository_init(repo, VarPtr(dirB(0)), 0)
+        Results.Check "4.repository_init (non-ASCII path)", rc = 0, Detail(rc)
+        If rc <> 0 Then Exit Sub
+        Dim wd As String = FromUtf8(git_repository_workdir(repo))
+        Results.Check "4.repository_workdir round trip (long-name compare)", SamePath(wd, dirPath), wd
+
+        ' first commit: a.txt, no parents
+        WriteFile dirPath & "\a.txt", "one"
+        Dim idx As git_index
+        Results.CheckEq "4.repository_index", git_repository_index(idx, repo), 0
+        Dim aB() As Byte = ToUtf8("a.txt")
+        Dim bB() As Byte = ToUtf8("b.txt")
+        Results.CheckEq "4.index_add_bypath a.txt", git_index_add_bypath(idx, VarPtr(aB(0))), 0
+        Results.CheckEq "4.index_write", git_index_write(idx), 0
+        Dim treeId1 As git_oid
+        Results.CheckEq "4.index_write_tree", git_index_write_tree(treeId1, idx), 0
+        Dim tree1 As git_tree
+        Results.CheckEq "4.tree_lookup", git_tree_lookup(tree1, repo, treeId1), 0
+        Dim sig As LongPtr
+        Dim nameB() As Byte = ToUtf8(author)
+        Dim emailB() As Byte = ToUtf8(AUTHOR_EMAIL)
+        Results.CheckEq "4.signature_new (time, offset in minutes)", git_signature_new(sig, VarPtr(nameB(0)), VarPtr(emailB(0)), 1700000000^, 90), 0
+        Dim headB() As Byte = ToUtf8("HEAD")
+        Dim msg1() As Byte = ToUtf8("first" & vbLf)
+        Dim c1 As git_oid
+        rc = git_commit_create(c1, repo, VarPtr(headB(0)), ByVal sig, ByVal sig, vbNullPtr, VarPtr(msg1(0)), tree1, 0, ByVal vbNullPtr)
+        Results.Check "4.commit_create (signature by pointer, parents NULL)", rc = 0, Detail(rc)
+
+        ' second commit: a.txt changed, b.txt added, parent = first
+        WriteFile dirPath & "\a.txt", "two"
+        WriteFile dirPath & "\b.txt", "new"
+        Results.CheckEq "4.index_add_bypath a.txt again", git_index_add_bypath(idx, VarPtr(aB(0))), 0
+        Results.CheckEq "4.index_add_bypath b.txt", git_index_add_bypath(idx, VarPtr(bB(0))), 0
+        Results.CheckEq "4.index_write again", git_index_write(idx), 0
+        Dim treeId2 As git_oid
+        Results.CheckEq "4.index_write_tree again", git_index_write_tree(treeId2, idx), 0
+        Dim tree2 As git_tree
+        Results.CheckEq "4.tree_lookup again", git_tree_lookup(tree2, repo, treeId2), 0
+        Dim commit1 As git_commit
+        Results.CheckEq "4.commit_lookup first", git_commit_lookup(commit1, repo, c1), 0
+        Dim parents(0 To 0) As git_commit
+        parents(0) = commit1
+        Dim msg2() As Byte = ToUtf8("second" & vbLf)
+        Dim c2 As git_oid
+        rc = git_commit_create(c2, repo, VarPtr(headB(0)), ByVal sig, ByVal sig, vbNullPtr, VarPtr(msg2(0)), tree2, 1, parents(0))
+        Results.Check "4.commit_create with a parents array", rc = 0, Detail(rc)
+        Dim headId As git_oid
+        Results.CheckEq "4.reference_name_to_id HEAD", git_reference_name_to_id(headId, repo, VarPtr(headB(0))), 0
+        Results.CheckEq "4.HEAD is the second commit", OidHex(headId), OidHex(c2)
+        Results.CheckEq "4.oid hex is 40 digits", Len(OidHex(c2)), GIT_OID_SHA1_HEXSIZE
+
+        Dim commit2 As git_commit
+        Results.CheckEq "4.commit_lookup second", git_commit_lookup(commit2, repo, c2), 0
+        Results.CheckEq "4.commit_message", FromUtf8(git_commit_message(commit2)), "second" & vbLf
+        Results.CheckEq "4.commit_parentcount", git_commit_parentcount(commit2), 1
+        Results.CheckEq "4.commit_time (git_time_t = LongLong)", git_commit_time(commit2), 1700000000^
+        Results.CheckEq "4.commit_time_offset", git_commit_time_offset(commit2), 90
+        Dim pAuthor As LongPtr = git_commit_author(commit2)
+        Results.Check "4.commit_author not NULL", pAuthor <> 0
+        If pAuthor <> 0 Then
+            With CType(Of git_signature)(pAuthor)
+                Results.CheckEq "4.author name (UTF-8 round trip)", FromUtf8(.name) = author, True
+                Results.CheckEq "4.author email", FromUtf8(.email), AUTHOR_EMAIL
+                Results.CheckEq "4.author when.offset", .when.offset, 90
+            End With
+        End If
+
+        ' revwalk
+        Dim walk As git_revwalk
+        Results.CheckEq "4.revwalk_new", git_revwalk_new(walk, repo), 0
+        Results.CheckEq "4.revwalk_push_head", git_revwalk_push_head(walk), 0
+        Results.CheckEq "4.revwalk_sorting topological", git_revwalk_sorting(walk, GIT_SORT_TOPOLOGICAL), 0
+        Dim w As git_oid, order As String
+        Do
+            rc = git_revwalk_next(w, walk)
+            If rc <> 0 Then Exit Do
+            order &= OidHex(w) & ";"
+        Loop
+        Results.CheckEq "4.revwalk order (second, first)", order, OidHex(c2) & ";" & OidHex(c1) & ";"
+        Results.CheckEq "4.revwalk ends with GIT_ITEROVER", rc, GIT_ITEROVER
+        git_revwalk_free walk
+
+        ' branch
+        Dim featB() As Byte = ToUtf8("feature")
+        Dim ref As git_reference
+        rc = git_branch_create(ref, repo, VarPtr(featB(0)), commit2, 0)
+        Results.Check "4.branch_create", rc = 0, Detail(rc)
+        If rc = 0 Then git_reference_free ref
+        Dim featRefB() As Byte = ToUtf8("refs/heads/feature")
+        Dim featId As git_oid
+        Results.CheckEq "4.branch points at the second commit", If(git_reference_name_to_id(featId, repo, VarPtr(featRefB(0))) = 0, OidHex(featId), "(not found)"), OidHex(c2)
+        Dim ref2 As git_reference
+        rc = git_branch_create(ref2, repo, VarPtr(featB(0)), commit2, 0)
+        Results.CheckEq "4.branch_create of an existing name returns GIT_EEXISTS", rc, GIT_EEXISTS
+        Results.Check "4.error_last describes it", InStr(LCase$(LastGitError()), "exists") > 0, LastGitError()
+
+        ' diff between the two commits' trees
+        Dim dopts As git_diff_options
+        Results.CheckEq "4.diff_options_init", git_diff_options_init(dopts, GIT_DIFF_OPTIONS_VERSION), 0
+        Dim diff As git_diff
+        rc = git_diff_tree_to_tree(diff, repo, tree1, tree2, dopts)
+        Results.Check "4.diff_tree_to_tree", rc = 0, Detail(rc)
+        If rc = 0 Then
+            Results.CheckEq "4.diff_num_deltas", git_diff_num_deltas(diff), 2
+            Dim i As Long, pd As LongPtr, seen As String
+            For i = 0 To CLng(git_diff_num_deltas(diff)) - 1
+                pd = git_diff_get_delta(diff, i)
+                With CType(Of git_diff_delta)(pd)
+                    seen &= .status & ":" & FromUtf8(.new_file.path) & ";"
+                End With
+            Next
+            Results.CheckEq "4.diff deltas (CType(Of git_diff_delta))", seen, GIT_DELTA_MODIFIED & ":a.txt;" & GIT_DELTA_ADDED & ":b.txt;"
+            git_diff_free diff
+        End If
+        Dim diff2 As git_diff
+        rc = git_diff_tree_to_tree(diff2, repo, tree1, tree2, ByVal vbNullPtr)
+        Results.Check "4.diff_tree_to_tree with NULL options (ByVal vbNullPtr)", rc = 0, Detail(rc)
+        If rc = 0 Then
+            Results.CheckEq "4.diff with NULL options finds the same deltas", git_diff_num_deltas(diff2), 2
+            git_diff_free diff2
+        End If
+
+        git_commit_free commit1
+        git_commit_free commit2
+        git_tree_free tree1
+        git_tree_free tree2
+        git_index_free idx
+        git_signature_free ByVal sig
+        git_repository_free repo
+        Results.Check "4.freed everything", True
+    End Sub
+
+    ' ---- 5. the fixture repository made by git.exe -------------------------------------------
+    Private Function OnRefName CDecl(ByVal refName As LongPtr, ByVal payload As LongPtr) As Long
+        mRefCalls += 1
+        mRefNames &= FromUtf8(refName) & ";"
+        mRefPayload = payload
+        Return 0
+    End Function
+
+    Private Function OnRefNameStop CDecl(ByVal refName As LongPtr, ByVal payload As LongPtr) As Long
+        mRefCalls += 1
+        Return 7
+    End Function
+
+    Private Sub FixtureRepo()
+        Dim fixture As String = Results.HarnessDir() & "\fixture"
+        Dim pathB() As Byte = ToUtf8(fixture & "\repo")
+        Dim repo As git_repository
+        Dim rc As Long = git_repository_open(repo, VarPtr(pathB(0)))
+        Results.Check "5.repository_open (fixture made by git.exe)", rc = 0, Detail(rc)
+        If rc <> 0 Then Exit Sub
+
+        Dim obj As git_object
+        Dim specB() As Byte = ToUtf8("HEAD")
+        Results.CheckEq "5.revparse_single_ (renamed, Alias)", git_revparse_single_(obj, repo, VarPtr(specB(0))), 0
+        Dim pAuthor As LongPtr = git_commit_author(obj)   ' git_object passed where git_commit is declared
+        Results.Check "5.commit_author of a git_object", pAuthor <> 0
+        If pAuthor <> 0 Then
+            With CType(Of git_signature)(pAuthor)
+                Results.CheckEq "5.author name written by git.exe (UTF-8)", FromUtf8(.name) = "Zo" & ChrW$(&HEB) & " T" & ChrW$(&HEB) & "ster", True
+                Results.CheckEq "5.author when.time", .when.time, 1700000000^
+                Results.CheckEq "5.author when.offset (+0130)", .when.offset, 90
+                Results.CheckEq "5.author when.sign", .when.sign, 43
+            End With
+        End If
+        Results.CheckEq "5.commit_time", git_commit_time(obj), 1700000000^
+        git_object_free obj
+
+        Dim tags As git_strarray
+        Results.CheckEq "5.tag_list", git_tag_list(tags, repo), 0
+        Results.CheckEq "5.tag_list count", tags.count, 1
+        If tags.count > 0 Then
+            Dim first As LongPtr
+            RtlMoveMemory VarPtr(first), tags.strings, LenB(first)
+            Results.CheckEq "5.tag_list strings(0)", FromUtf8(first), "v1"
+        End If
+        git_strarray_dispose tags
+
+        mRefNames = "": mRefPayload = 0: mRefCalls = 0
+        Results.CheckEq "5.reference_foreach_name", git_reference_foreach_name(repo, AddressOf OnRefName, 3333), 0
+        Results.Check "5.foreach callback saw the refs", InStr(mRefNames, "refs/heads/main;") > 0 And InStr(mRefNames, "refs/heads/feature;") > 0 And InStr(mRefNames, "refs/tags/v1;") > 0, mRefNames
+        Results.CheckEq "5.foreach callback payload", mRefPayload, 3333
+        mRefCalls = 0
+        Results.CheckEq "5.foreach returns the callback's non-zero value", git_reference_foreach_name(repo, AddressOf OnRefNameStop, 0), 7
+        Results.CheckEq "5.foreach stopped after the first callback", mRefCalls, 1
+        git_repository_free repo
+
+        ' task 19: a git_buf the library fills and the caller disposes
+        Dim gb As git_buf
+        Dim startB() As Byte = ToUtf8(fixture & "\repo")
+        rc = git_repository_discover(gb, VarPtr(startB(0)), 0, vbNullPtr)
+        Results.Check "5.repository_discover into a git_buf", rc = 0, Detail(rc)
+        If rc = 0 Then
+            Dim found As String = FromUtf8(gb.ptr)
+            Results.Check "5.git_buf.ptr is the repo's .git folder (long-name compare)", SamePath(found, fixture & "\repo\.git"), found
+            Results.CheckEq "5.git_buf.size is the UTF-8 byte length", gb.size, UBound(ToUtf8(found))
+            git_buf_dispose gb
+            ' buffer.h only promises the memory is freed: libgit2 leaves ptr at its own static empty
+            ' string (not NULL) and size 0. The caller must not use the old contents afterwards.
+            Results.Check "5.git_buf_dispose freed it (size 0, ptr empty or NULL)", gb.size = 0 And (gb.ptr = 0 Or FromUtf8(gb.ptr) = ""), _
+                "ptr=" & gb.ptr & " size=" & gb.size
+        End If
+
+        Dim bare As git_repository
+        Dim bareB() As Byte = ToUtf8(fixture & "\repo.git")
+        rc = git_repository_open_bare(bare, VarPtr(bareB(0)))
+        Results.Check "5.repository_open_bare", rc = 0, Detail(rc)
+        If rc = 0 Then
+            Results.CheckEq "5.repository_is_bare", git_repository_is_bare(bare), 1
+            Results.Check "5.workdir of a bare repo is NULL", git_repository_workdir(bare) = 0
+            git_repository_free bare
+        End If
+    End Sub
+
+    ' ---- 6. clone over file:// with callbacks (PRD req. 36) -----------------------------------
+    Private Sub OnCheckoutProgress CDecl(ByVal path As LongPtr, ByVal completed_steps As LongPtr, ByVal total_steps As LongPtr, ByVal payload As LongPtr)
+        mCheckoutCalls += 1
+        mCheckoutTotal = total_steps
+        mCheckoutPayload = payload
+        If path <> 0 Then mCheckoutPath = FromUtf8(path)
+    End Sub
+
+    Private Function OnTransferProgress CDecl(ByRef stats As git_indexer_progress, ByVal payload As LongPtr) As Long
+        mTransferCalls += 1
+        mTransferTotal = stats.total_objects
+        mTransferReceived = stats.received_objects
+        mTransferPayload = payload
+        Return 0
+    End Function
+
+    Private Sub CloneWithCallbacks()
+        Dim url As String = "file:///" & Replace(Results.HarnessDir() & "\fixture\repo", "\", "/")
+        Dim urlB() As Byte = ToUtf8(url)
+        Dim target As String = mWork & "\clone"
+        Dim targetB() As Byte = ToUtf8(target)
+        Dim opts As git_clone_options
+        Results.CheckEq "6.clone_options_init", git_clone_options_init(opts, GIT_CLONE_OPTIONS_VERSION), 0
+        Results.CheckEq "6.clone_options_init wrote the version", opts.version, GIT_CLONE_OPTIONS_VERSION
+        opts.checkout_opts.progress_cb = AddressOf OnCheckoutProgress
+        opts.checkout_opts.progress_payload = 1111
+        opts.fetch_opts.callbacks.transfer_progress = AddressOf OnTransferProgress
+        opts.fetch_opts.callbacks.payload = 2222
+        opts.local = GIT_CLONE_NO_LOCAL     ' use the transport, so transfer progress is reported
+        Dim repo As git_repository
+        Dim rc As Long = git_clone(repo, VarPtr(urlB(0)), VarPtr(targetB(0)), opts)
+        Results.Check "6.clone over file://", rc = 0, Detail(rc) & " url=" & url
+        If rc <> 0 Then Exit Sub
+        Results.Check "6.checkout progress callback called", mCheckoutCalls > 0, "calls=" & mCheckoutCalls
+        Results.CheckEq "6.checkout total_steps (2 files)", mCheckoutTotal, 2
+        Results.CheckEq "6.checkout payload", mCheckoutPayload, 1111
+        Results.Check "6.checkout path (char* in a callback)", mCheckoutPath = "a.txt" Or mCheckoutPath = "b.txt", mCheckoutPath
+        Results.Check "6.transfer progress callback called", mTransferCalls > 0, "calls=" & mTransferCalls
+        Results.Check "6.transfer complete", mTransferTotal > 0 And mTransferReceived = mTransferTotal, "received=" & mTransferReceived & " total=" & mTransferTotal
+        Results.CheckEq "6.transfer payload", mTransferPayload, 2222
+        Dim gitDir As String = FromUtf8(git_repository_path(repo))
+        Results.Check "6.repository_path round trip (long-name compare)", SamePath(gitDir, target & "\.git"), gitDir
+        Results.Check "6.checked-out file exists", Len(Dir$(target & "\a.txt")) > 0
+        git_repository_free repo
+
+        Dim repo2 As git_repository
+        Dim target2B() As Byte = ToUtf8(target & "-default")
+        rc = git_clone(repo2, VarPtr(urlB(0)), VarPtr(target2B(0)), ByVal vbNullPtr)
+        Results.Check "6.clone with NULL options (ByVal vbNullPtr)", rc = 0, Detail(rc)
+        If rc = 0 Then git_repository_free repo2
+    End Sub
+End Module

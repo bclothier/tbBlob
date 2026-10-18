@@ -1,0 +1,9 @@
+' A delegate tbBlob must generate for an unnamed function pointer (a struct field or parameter
+' whose type is "int (*)(...)" rather than a typedef). Name = <owner>_<member>_cb.
+Class SynthDelegate
+    Public Name As String
+    Public FnType As MSXML2.IXMLDOMElement     ' the CastXML FunctionType element
+    Public Owner As String      ' record or function name, for the comment
+    Public Source As MSXML2.IXMLDOMElement     ' the Field (or Function, for a parameter) that declares it
+    Public FromParam As Boolean ' declared inline in a function's parameter list
+End Class

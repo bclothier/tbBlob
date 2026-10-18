@@ -1,0 +1,193 @@
+' Checks every dependency tbBlob needs on this machine (tbBlob --check, D-035): one DepCheck per
+' dependency, with what was found or what is missing, and how to fix it. The same messages are
+' used when a normal run fails for lack of a dependency.
+Module Doctor
+    Private Const FIX_VS As String = "In the Visual Studio Installer, add the 'Desktop development with C++' workload " & _
+        "(MSVC x64/x86 build tools and a Windows 10/11 SDK) to Visual Studio 2022 or the Build Tools for Visual Studio 2022 " & _
+        "(https://aka.ms/vs/17/release/vs_BuildTools.exe)"
+
+    ' Where the Visual Studio Installer keeps vswhere.exe.
+    Public Function VswherePath() As String
+        Return Environ$("ProgramFiles(x86)") & "\Microsoft Visual Studio\Installer\vswhere.exe"
+    End Function
+
+    Private Function NewCheck(ByVal name As String, ByVal ok As Boolean, ByVal detail As String, ByVal fix As String) As DepCheck
+        Dim c As New DepCheck
+        c.Name = name
+        c.Ok = ok
+        c.Detail = detail
+        c.Fix = fix
+        Return c
+    End Function
+
+    Private Function Skip(ByVal name As String, ByVal detail As String) As DepCheck
+        Dim c As DepCheck = NewCheck(name, False, "not checked: " & detail, "")
+        c.Skipped = True
+        Return c
+    End Function
+
+    Private Function FirstLine(ByVal text As String) As String
+        Dim lines() As String = Split(Replace(text, vbCr, ""), vbLf)
+        Dim i As Long
+        For i = 0 To UBound(lines)
+            If Len(Trim$(lines(i))) > 0 Then Return Trim$(lines(i))
+        Next
+        Return ""
+    End Function
+
+    ' The first line mentioning an error, else the first line.
+    Private Function ErrorLine(ByVal text As String) As String
+        Dim lines() As String = Split(Replace(text, vbCr, ""), vbLf)
+        Dim i As Long
+        For i = 0 To UBound(lines)
+            If InStr(1, lines(i), "error", vbTextCompare) > 0 Then Return Trim$(lines(i))
+        Next
+        Return FirstLine(text)
+    End Function
+
+    ' o: --castxml (o.CastXmlPath); exeDir: tbBlob.exe's folder (bundled CastXML); vswhere: the
+    ' vswhere.exe to use; vsOverride: a Visual Studio folder to use instead of vswhere's answer
+    ' ("" = ask vswhere). Every check is always reported; one that needs a missing dependency says
+    ' "not checked".
+    Public Function CheckEnvironment(o As CliOptions, ByVal exeDir As String, ByVal vswhere As String, ByVal vsOverride As String) As Collection
+        Dim r As New Collection
+
+        ' 1. castxml.exe
+        Dim envCx As String = Environ$("CASTXML")
+        Dim cx As String = CastXmlRunner.FindCastXmlIn(o.CastXmlPath, envCx, exeDir, Environ$("PATH"))
+        If Len(cx) > 0 Then
+            Dim source As String
+            If Len(o.CastXmlPath) > 0 Then
+                source = "--castxml"
+            ElseIf LCase$(cx) = LCase$(envCx) Then
+                source = "CASTXML variable"
+            ElseIf LCase$(cx) = LCase$(CastXmlRunner.BundledCastXml(exeDir)) Then
+                source = "bundled with tbBlob"
+            Else
+                source = "PATH"
+            End If
+            r.Add NewCheck("castxml.exe", True, cx & " (" & source & ")", "")
+        Else
+            r.Add NewCheck("castxml.exe", False, "not found; looked at " & _
+                If(Len(o.CastXmlPath) > 0, o.CastXmlPath & " (--castxml)", "the CASTXML variable, " & CastXmlRunner.BundledCastXml(exeDir) & " and PATH"), _
+                "Keep the castxml folder that comes with tbBlob next to tbBlob.exe, or install CastXML (for example vcpkg install castxml) " & _
+                "and pass --castxml <path>, set the CASTXML variable, or add its bin folder to PATH")
+        End If
+
+        ' 2. castxml.exe starts
+        Dim code As Long, started As Boolean
+        If Len(cx) = 0 Then
+            r.Add Skip("castxml.exe starts", "castxml.exe not found")
+        ElseIf Not CastXmlRunner.LooksLikeProgram(cx) Then
+            ' never run it: Windows would show a "This app can't run on your PC" dialog
+            r.Add NewCheck("castxml.exe starts", False, "not a valid program (no Windows executable header; empty or damaged?), so not run", _
+                "Reinstall CastXML, or use the one bundled with tbBlob")
+        Else
+            code = Tools.RunCommand(Tools.Quote(cx) & " --version")
+            Dim ver As String = FirstLine(Tools.LastToolOutput)
+            If code = 0 And InStr(ver, "castxml version") > 0 Then
+                started = True
+                r.Add NewCheck("castxml.exe starts", True, ver, "")
+            Else
+                r.Add NewCheck("castxml.exe starts", False, "exit " & code & If(Len(ver) > 0, ": " & ver, ""), _
+                    If(Len(CastXmlRunner.ExplainExit(code)) > 0, CastXmlRunner.ExplainExit(code), "castxml.exe did not run; reinstall CastXML (or use the one bundled with tbBlob)"))
+            End If
+        End If
+
+        ' 3. CastXML resource headers
+        Dim resourceOk As Boolean
+        If Len(cx) = 0 Then
+            r.Add Skip("CastXML resource headers", "castxml.exe not found")
+        Else
+            Dim res As String = CastXmlRunner.ResourceHeaderPath(cx)
+            resourceOk = FileSys.KindOf(res) = FileSys.KIND_FILE
+            r.Add NewCheck("CastXML resource headers", resourceOk, FileSys.ParentOf(res) & If(resourceOk, "", " not found"), _
+                If(resourceOk, "", "castxml.exe needs the share\castxml folder that comes with it next to its bin folder: copy CastXML's whole folder (bin and share)"))
+        End If
+
+        ' 4. vswhere.exe
+        Dim haveVswhere As Boolean = FileSys.KindOf(vswhere) = FileSys.KIND_FILE
+        r.Add NewCheck("vswhere.exe", haveVswhere, vswhere & If(haveVswhere, "", " not found"), _
+            If(haveVswhere, "", "Install Visual Studio 2022 or the Build Tools for Visual Studio 2022 (https://aka.ms/vs/17/release/vs_BuildTools.exe); vswhere.exe comes with the Visual Studio Installer"))
+
+        ' 5. Visual Studio with C++ tools
+        Dim vs As String = vsOverride
+        If Len(vs) = 0 And haveVswhere Then vs = CastXmlRunner.FindVsPath(vswhere)
+        Dim haveVs As Boolean = Len(vs) > 0
+        If haveVs Then haveVs = FileSys.KindOf(vs) = FileSys.KIND_FOLDER
+        r.Add NewCheck("Visual Studio with C++ tools", haveVs, If(haveVs, vs, If(Len(vs) > 0, vs & " not found", "no installation with the C++ tools (vswhere -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64)")), _
+            If(haveVs, "", FIX_VS))
+
+        ' 6. vcvars
+        Dim vc32 As String = CastXmlRunner.FindVcvarsIn(vs, "x86")
+        Dim vc64 As String = CastXmlRunner.FindVcvarsIn(vs, "x64")
+        Dim haveVc As Boolean = Len(vc32) > 0 And Len(vc64) > 0
+        r.Add NewCheck("vcvars32.bat / vcvars64.bat", haveVc, _
+            If(haveVc, vs & "\VC\Auxiliary\Build", If(Len(vs) > 0, "missing under " & vs & "\VC\Auxiliary\Build", "not checked: no Visual Studio with the C++ tools")), _
+            If(haveVc, "", FIX_VS))
+        If Not haveVc And Len(vs) = 0 Then r(r.Count).Skipped = True
+
+        ' 7-8. compile probes: CastXML preprocesses <windows.h> with each architecture's MSVC + SDK
+        Dim arch As Variant
+        For Each arch In Array("x86", "x64")
+            If Not started Or Not resourceOk Or Not haveVc Then
+                r.Add Skip("compile probe " & arch, "needs a castxml.exe that starts, its resource headers and vcvars")
+            Else
+                r.Add Probe(cx, If(arch = "x86", vc32, vc64), arch)
+            End If
+        Next
+
+        ' 9. MSXML 6
+        Dim doc As Object, why As String
+        On Error Resume Next
+        Set doc = CreateObject("MSXML2.DOMDocument.6.0")
+        why = Err.Description
+        On Error GoTo 0
+        r.Add NewCheck("MSXML 6", Not doc Is Nothing, If(doc Is Nothing, "cannot be created: " & why, "MSXML2.DOMDocument.6.0"), _
+            If(doc Is Nothing, "MSXML 6 is part of Windows; repair Windows or install MSXML 6", ""))
+        Return r
+    End Function
+
+    Private Function Probe(ByVal cx As String, ByVal vcvars As String, ByVal arch As String) As DepCheck
+        Dim t As String = FileSys.MakeTempFolder("tbBlob-check")
+        FileSys.WriteTextUtf8 t & "\probe.h", "#include <windows.h>" & vbCrLf
+        Dim script As String = CastXmlRunner.BuildScript(vcvars, cx, t, New Collection, New Collection, t & "\probe.h", t & "\out.txt", True)
+        FileSys.WriteTextUtf8 t & "\probe.cmd", script
+        Dim code As Long = Tools.RunCommand(Tools.Quote(t & "\probe.cmd"))
+        Dim ok As Boolean = code = 0 And FileSys.KindOf(t & "\out.txt") = FileSys.KIND_FILE
+        Dim output As String = Tools.LastToolOutput
+        FileSys.RemovePath t
+        If ok Then Return NewCheck("compile probe " & arch, True, "<windows.h> preprocessed by CastXML with " & FileSys.BaseName(vcvars), "")
+        Dim fix As String = CastXmlRunner.ExplainExit(code)
+        If Len(fix) = 0 Then fix = "Install the MSVC " & arch & " build tools and a Windows 10/11 SDK: " & FIX_VS
+        Return NewCheck("compile probe " & arch, False, "exit " & code & ": " & ErrorLine(output), fix)
+    End Function
+
+    ' One line per check (OK / MISSING, name, detail), the fix under each missing one, and a summary.
+    Public Function FormatChecks(checks As Collection) As String
+        Dim s As String, c As DepCheck, missing As Long, skipped As Long
+        For Each c In checks
+            s &= Left$(If(c.Ok, "OK", If(c.Skipped, "SKIPPED", "MISSING")) & Space$(9), 9) & Left$(c.Name & Space$(30), 30) & " " & c.Detail & vbLf
+            If c.Skipped Then
+                skipped += 1
+            ElseIf Not c.Ok Then
+                missing += 1
+                If Len(c.Fix) > 0 Then s &= Space$(9) & "fix: " & c.Fix & vbLf
+            End If
+        Next
+        If missing = 0 And skipped = 0 Then
+            s &= "all " & checks.Count & " dependencies OK"
+        Else
+            s &= missing & " missing" & If(skipped > 0, ", " & skipped & " not checked because of them", "") & " -- out of " & checks.Count & " checks"
+        End If
+        Return s
+    End Function
+
+    Public Function AllOk(checks As Collection) As Boolean
+        Dim c As DepCheck
+        For Each c In checks
+            If Not c.Ok Then Return False
+        Next
+        Return True
+    End Function
+End Module

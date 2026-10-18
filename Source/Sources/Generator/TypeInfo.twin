@@ -1,0 +1,12 @@
+' What a CastXML type id is, in tB terms (TypeMapper.Classify).
+' Kind: "scalar", "enum", "record", "opaque", "delegate", "fntype", "pointer", "array", "void".
+Class TypeInfo
+    Public Kind As String
+    Public TbType As String     ' scalar: Byte/Integer/Long/LongLong/Single/Double/LongPtr; enum/record/opaque/delegate: its name
+    Public CName As String      ' scalar: the C fundamental type name (e.g. "unsigned int"), or the pointer-sized typedef
+    Public RefId As String      ' pointer/array: the pointee/element type id
+    Public ArrayMax As Long     ' array: the highest index (C size - 1)
+    Public FnId As String       ' fntype: the FunctionType id
+    Public Name As String       ' delegate/fntype: the typedef name, "" for an unnamed function type
+    Public AliasName As String  ' set when reached through a library type alias (D-025): signatures use it
+End Class

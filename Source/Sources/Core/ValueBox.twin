@@ -1,0 +1,5 @@
+' A value held in a keyed Collection so it can be changed in place: c(key).Value = x (D-040).
+' tB's Collection cannot replace an item under an existing key; an object item's fields can be.
+Class ValueBox
+    Public Value As Variant
+End Class

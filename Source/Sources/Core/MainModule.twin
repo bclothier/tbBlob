@@ -1,0 +1,111 @@
+' tbBlob -- generates twinBASIC FFI bindings for a C library from its headers, using CastXML.
+Module MainModule
+    Private Declare PtrSafe Sub ExitProcess Lib "kernel32" (ByVal uExitCode As Long)
+
+    Public Const EXIT_OK As Long = 0
+    Public Const EXIT_FAILED As Long = 1
+    Public Const EXIT_USAGE As Long = 2
+    Public Const EXIT_MISSING_PATH As Long = 3
+    Public Const EXIT_TOOL_NOT_FOUND As Long = 4
+
+    Public Sub Main()
+        Dim code As Long
+        On Error GoTo Crashed
+        code = Run(Console.Arguments())
+        ExitProcess code
+        Exit Sub
+    Crashed:
+        Console.WriteErr "ERROR: " & Err.Description
+        ExitProcess EXIT_FAILED
+    End Sub
+
+    Public Function Usage() As String
+        Return Join(Array( _
+            "Usage:", _
+            "  tbBlob <header folder> <entry header> <dll name> <output folder> [options]", _
+            "  tbBlob --check [--castxml <path>]", _
+            "  tbBlob --self-test [--integration]", _
+            "  tbBlob --help", _
+            "", _
+            "Generates twinBASIC bindings (Declares, Types, Enums, Delegates, constants) for the C", _
+            "library whose headers are in <header folder>, starting from <entry header>, bound to", _
+            "<dll name>. It writes, in <output folder>:", _
+            "  report.md   read this first: what was generated, skipped, renamed or lost", _
+            "  Source\     the .twin files, one module per header, plus <name>_LayoutCheck.twin", _
+            "              and <name>_Loader.twin (optional: load the DLL from a folder you choose)", _
+            "  Work\       CastXML's output and the .cmd scripts that produced it", _
+            "Adding the .twin files to a project is up to you.", _
+            "", _
+            "Options:", _
+            "  --name <name>        project name (default: the DLL name without its extension)", _
+            "  -I <folder>          extra include folder for CastXML (repeatable)", _
+            "  -D <name[=value]>    preprocessor define for CastXML (repeatable)", _
+            "  --castxml <path>     castxml.exe (default: the CASTXML variable, then castxml\bin\castxml.exe", _
+            "                       next to tbBlob.exe, then PATH)", _
+            "  --check              check every dependency (CastXML, MSVC, Windows SDK, MSXML 6), print", _
+            "                       OK or MISSING with the fix for each, and exit (0 all OK, 4 missing)", _
+            "  --also <header>      another header to generate from, relative to the header folder", _
+            "                       (repeatable; e.g. headers the entry header does not include)", _
+            "  --x86-dll <path>     the built x86 DLL: its export table decides whether each", _
+            "                       __stdcall function is bound as name or _name@N on x86", _
+            "  --self-test          run the built-in tests; --integration adds tests that use", _
+            "                       CastXML, MSVC, MSXML6 and (to test the output) the import tool", _
+            "", _
+            "Exit codes:", _
+            "  0  done", _
+            "  1  failed (see the message and the generation report)", _
+            "  2  a mistake in the command line", _
+            "  3  the header folder or the entry header does not exist", _
+            "  4  a required tool or file (CastXML, its resource headers, MSVC, the Windows SDK) was", _
+            "     not found -- run tbBlob --check to see which and how to fix it"), vbLf)
+    End Function
+
+    ' Runs one command line (without the program name) and returns the exit code.
+    Public Function Run(args() As String) As Long
+        Dim o As New CliOptions
+        Dim problem As String = o.Parse(args)
+        If Len(problem) > 0 Then
+            Console.WriteErr "ERROR: " & problem & vbLf & vbLf & Usage()
+            Return EXIT_USAGE
+        End If
+        If o.Help Then
+            Console.WriteOut Usage()
+            Return EXIT_OK
+        End If
+        If o.SelfTest Then Return IIf(SelfTest.RunAll(o.Integration) > 0, EXIT_FAILED, EXIT_OK)
+        If o.Check Then
+            Dim checks As Collection = Doctor.CheckEnvironment(o, App.Path, Doctor.VswherePath(), "")
+            Console.WriteOut Doctor.FormatChecks(checks)
+            Return If(Doctor.AllOk(checks), EXIT_OK, EXIT_TOOL_NOT_FOUND)
+        End If
+
+        If FileSys.KindOf(o.HeaderFolder) <> FileSys.KIND_FOLDER Then
+            Console.WriteErr "ERROR: header folder not found: " & o.HeaderFolder
+            Return EXIT_MISSING_PATH
+        End If
+        Dim entry As String = FileSys.JoinPath(o.HeaderFolder, o.EntryHeader)
+        If FileSys.KindOf(entry) <> FileSys.KIND_FILE Then
+            Console.WriteErr "ERROR: entry header not found: " & entry
+            Return EXIT_MISSING_PATH
+        End If
+        Dim also As Variant
+        For Each also In o.AlsoHeaders
+            If FileSys.KindOf(FileSys.JoinPath(o.HeaderFolder, also)) <> FileSys.KIND_FILE Then
+                Console.WriteErr "ERROR: --also header not found: " & FileSys.JoinPath(o.HeaderFolder, also)
+                Return EXIT_MISSING_PATH
+            End If
+        Next
+
+        If FileSys.KindOf(o.OutputFolder) = FileSys.KIND_FILE Then
+            Console.WriteErr "ERROR: the output " & o.OutputFolder & " is a file, not a folder" & vbLf & vbLf & Usage()
+            Return EXIT_USAGE
+        End If
+        Dim code As Long = Pipeline.Generate(o)
+        If code = EXIT_TOOL_NOT_FOUND Then
+            ' a dependency is missing: show all of them at once, as tbBlob --check does (D-035)
+            Console.WriteErr vbLf & "Dependency check (the same as tbBlob --check):" & vbLf & _
+                Doctor.FormatChecks(Doctor.CheckEnvironment(o, App.Path, Doctor.VswherePath(), ""))
+        End If
+        Return code
+    End Function
+End Module

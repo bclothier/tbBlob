@@ -1,0 +1,681 @@
+' Macro constants (PRD req. 18, 21; D-020). The -dM dump gives every macro's final definition;
+' scanning the header folder's .h files says which macros are the library's (and where).
+' Evaluate implements enough of the C preprocessor's integer arithmetic for constants: C literal
+' typing (int / unsigned int / long long / unsigned long long), 32-bit wrap-around, + - * / %
+' << >> & | ^ ~ ! comparisons && ||, parentheses, simple integer casts, char/string literals.
+Class MacroTable
+    Private mBodies As Collection       ' name -> body (object-like macros)
+    Private mFnLike As Collection       ' name -> True (function-like macros)
+    Private mHeaders As Collection      ' library name -> header path
+    Private mLibrary As Collection  ' library names in order
+    Private mValues As Collection       ' name -> MacroValue (cache)
+    Private mVisiting As Collection     ' names being evaluated (cycle detection)
+    Private mEnumValues As Collection   ' enum value name -> LongLong (AddEnumValues)
+    Private mEnumBits As Collection     ' enum value name -> 32 or 64
+    Private mTypeNames As Collection    ' type name -> True (AddTypeName / AddEnumValues)
+
+    ' expression parsing state
+    Private mTok() As String
+    Private mPos As Long
+    Private mCount As Long
+    Private mProblem As String
+
+    ' Every map is a keyed tB Collection with case-sensitive keys (D-040): C macro, enum and type
+    ' names are case-sensitive.
+    Private Sub Class_Initialize()
+        Set mBodies = New Collection
+        mBodies.KeyCompareMode = vbBinaryCompare
+        Set mFnLike = New Collection
+        mFnLike.KeyCompareMode = vbBinaryCompare
+        Set mHeaders = New Collection
+        mHeaders.KeyCompareMode = vbBinaryCompare
+        Set mValues = New Collection
+        mValues.KeyCompareMode = vbBinaryCompare
+        Set mVisiting = New Collection
+        mVisiting.KeyCompareMode = vbBinaryCompare
+        Set mEnumValues = New Collection
+        mEnumValues.KeyCompareMode = vbBinaryCompare
+        Set mEnumBits = New Collection
+        mEnumBits.KeyCompareMode = vbBinaryCompare
+        Set mTypeNames = New Collection
+        mTypeNames.KeyCompareMode = vbBinaryCompare
+        Set mLibrary = New Collection
+    End Sub
+
+    ' Adds or replaces the item for key (a tB Collection cannot assign to an existing key). Only for
+    ' maps used by lookup: a replaced key moves to the end. (Not "Put": that is a VB statement.)
+    Private Sub StoreItem(c As Collection, ByVal key As String, ByVal value As Variant)
+        If c.Exists(key) Then c.Remove key
+        c.Add value, key
+    End Sub
+
+    ' ---- reading -------------------------------------------------------------------
+
+    Private Function IdentLength(ByVal s As String, ByVal start As Long) As Long
+        Dim i As Long = start
+        Do While i <= Len(s)
+            If Not (Mid$(s, i, 1) Like "[A-Za-z0-9_]") Then Exit Do
+            i += 1
+        Loop
+        Return i - start
+    End Function
+
+    ' Reads the -E -dM dump: every "#define NAME body" and "#define NAME(args) body".
+    Public Sub ParseDump(ByVal dumpText As String)
+        Dim line As Variant, rest As String, n As Long, name As String
+        For Each line In Split(Replace(dumpText, vbCr, ""), vbLf)
+            If Left$(line, 8) = "#define " Then
+                rest = Mid$(line, 9)
+                n = IdentLength(rest, 1)
+                If n > 0 Then
+                    name = Left$(rest, n)
+                    If Mid$(rest, n + 1, 1) = "(" Then
+                        If Not mFnLike.Exists(name) Then mFnLike.Add True, name
+                    Else
+                        StoreItem mBodies, name, Trim$(Mid$(rest, n + 1))     ' a redefinition keeps the last body
+                    End If
+                End If
+            End If
+        Next
+    End Sub
+
+    Private Sub ListHeaders(ByVal folder As String, ByVal rel As String, files As Collection)
+        Dim names() As String, n As Long, i As Long, full As String
+        n = FileSys.ListNames(folder, names)
+        For i = 0 To n - 1
+            full = folder & "\" & names(i)
+            If FileSys.KindOf(full) = FileSys.KIND_FOLDER Then
+                ListHeaders full, rel & names(i) & "\", files
+            ElseIf LCase$(Right$(names(i), 2)) = ".h" Then
+                files.Add full, rel & names(i)
+            End If
+        Next
+    End Sub
+
+    ' Scans every .h file under headerFolder for #define names; keeps those also in the dump.
+    Public Sub ScanLibrary(ByVal headerFolder As String)
+        If FileSys.KindOf(headerFolder) <> FileSys.KIND_FOLDER Then Exit Sub
+        Dim files As New Collection         ' relative path -> full path
+        files.KeyCompareMode = vbBinaryCompare
+        ListHeaders FileSys.FullPath(headerFolder), "", files
+        If files.Count = 0 Then Exit Sub
+        Dim rels() As String, k As Variant, i As Long
+        ReDim rels(0 To files.Count - 1)
+        For Each k In files.Keys()
+            rels(i) = k
+            i += 1
+        Next
+        TextKit.SortOrdinal rels, files.Count
+        Dim f As Long
+        For f = 0 To files.Count - 1
+            Dim path As String = files(rels(f))
+            Dim text As String = Replace(Replace(FileSys.ReadTextUtf8(path), vbCr, ""), "\" & vbLf, " ")
+            Dim line As Variant
+            For Each line In Split(text, vbLf)
+                Dim s As String = LTrim$(Replace(line, vbTab, " "))
+                If Left$(s, 1) = "#" Then
+                    s = LTrim$(Mid$(s, 2))
+                    If Left$(s, 7) = "define " Then
+                        s = LTrim$(Mid$(s, 8))
+                        Dim n As Long = IdentLength(s, 1)
+                        If n > 0 Then
+                            Dim name As String = Left$(s, n)
+                            If (mBodies.Exists(name) Or mFnLike.Exists(name)) And Not mHeaders.Exists(name) Then
+                                mHeaders.Add path, name
+                                mLibrary.Add name
+                            End If
+                        End If
+                    End If
+                End If
+            Next
+        Next
+    End Sub
+
+    ' Makes the library's enum values (from the CastXML model) usable in macro expressions, so
+    ' "#define X (SOME_ENUM_VALUE | 1)" evaluates. Enum values are C ints.
+    Public Sub AddEnumValues(m As CxModel)
+        Dim e As MSXML2.IXMLDOMElement, child As MSXML2.IXMLDOMElement, init As Variant
+        For Each e In m.Enumerations()
+            For Each child In e.childNodes
+                If child.nodeName = "EnumValue" Then
+                    init = CDec(m.Attr(child, "init"))
+                    If init >= CDec(-2147483648#) And init <= CDec(2147483647) Then
+                        StoreItem mEnumValues, m.Attr(child, "name"), CLngLng(init)
+                        StoreItem mEnumBits, m.Attr(child, "name"), 32
+                    Else
+                        StoreItem mEnumValues, m.Attr(child, "name"), CLngLng(init)
+                        StoreItem mEnumBits, m.Attr(child, "name"), 64
+                    End If
+                End If
+            Next
+        Next
+        ' and the library's type names, so a macro naming a type is reported as such
+        Dim el As MSXML2.IXMLDOMElement
+        For Each el In m.Typedefs()
+            AddTypeName m.Attr(el, "name")
+        Next
+        For Each el In m.Records()
+            AddTypeName m.NameOf(el)
+        Next
+        For Each el In m.Enumerations()
+            AddTypeName m.NameOf(el)
+        Next
+        For Each el In m.OpaqueStructs()
+            AddTypeName m.NameOf(el)
+        Next
+        ' values computed before the enums were known may have been "unknown identifier"
+        mValues.Clear
+    End Sub
+
+    ' Marks name as a type (typedef, struct, enum), so a macro whose body is that name is reported
+    ' as a type alias instead of an unknown identifier. AddEnumValues adds the model's types.
+    Public Sub AddTypeName(ByVal name As String)
+        If Len(name) > 0 And Not mTypeNames.Exists(name) Then mTypeNames.Add True, name
+    End Sub
+
+    ' The library's macro names, ordered by header path (ordinal) then line.
+    Public Function LibraryNames() As Collection
+        Return mLibrary
+    End Function
+
+    ' The header file that defines a library macro ("" if not the library's).
+    Public Function HeaderOf(ByVal name As String) As String
+        If mHeaders.Exists(name) Then Return mHeaders(name)
+        Return ""
+    End Function
+
+    ' The macro's body from the dump ("" if not defined).
+    Public Function Body(ByVal name As String) As String
+        If mBodies.Exists(name) Then Return mBodies(name)
+        Return ""
+    End Function
+
+    ' ---- values ----------------------------------------------------------------------
+
+    Private Function Skipped(ByVal reason As String) As MacroValue
+        Dim v As New MacroValue
+        v.Kind = "skipped"
+        v.Reason = reason
+        Return v
+    End Function
+
+    Private Function IntOf(ByVal value As LongLong, ByVal bits As Long, ByVal isUnsigned As Boolean) As MacroValue
+        Dim v As New MacroValue
+        v.Kind = "integer"
+        v.Bits = bits
+        v.IsUnsigned = isUnsigned
+        v.IntValue = Wrap(value, bits, isUnsigned)
+        Return v
+    End Function
+
+    Private Function Mask32() As LongLong
+        Return CLngLng(4294967295#)
+    End Function
+
+    ' value reduced to bits (32: low 32 bits, read as signed or unsigned; 64: unchanged).
+    Private Function Wrap(ByVal value As LongLong, ByVal bits As Long, ByVal isUnsigned As Boolean) As LongLong
+        If bits = 64 Then Return value
+        Dim low As LongLong = value And Mask32()
+        If isUnsigned Then Return low
+        If low >= CLngLng(2147483648#) Then Return low - CLngLng(4294967296#)
+        Return low
+    End Function
+
+    Public Function Evaluate(ByVal name As String) As MacroValue
+        If mValues.Exists(name) Then Return mValues(name)
+        Dim v As MacroValue
+        If mFnLike.Exists(name) Then
+            Set v = Skipped("function-like macro")
+        ElseIf Not mBodies.Exists(name) Then
+            Set v = Skipped("not defined")
+        ElseIf Len(mBodies(name)) = 0 Then
+            Set v = Skipped("empty (a flag or include guard)")
+        ElseIf Left$(mBodies(name), 1) = "{" Then
+            Set v = Skipped("initializer")
+        ElseIf mTypeNames.Exists(mBodies(name)) Then
+            ' the whole body is a type name: a type alias written as a macro (D-025)
+            Set v = New MacroValue
+            v.Kind = "typealias"
+            v.StrValue = mBodies(name)
+        ElseIf mVisiting.Exists(name) Then
+            Return Skipped("cyclic reference through " & name)
+        Else
+            mVisiting.Add True, name
+            Set v = EvaluateBody(mBodies(name))
+            mVisiting.Remove name
+        End If
+        If mValues.Exists(name) Then mValues.Remove name
+        mValues.Add v, name
+        Return v
+    End Function
+
+    Private Function EvaluateBody(ByVal body As String) As MacroValue
+        mProblem = ""
+        Tokenize body
+        If Len(mProblem) > 0 Then Return Skipped(mProblem)
+        ' string literal(s), possibly adjacent
+        If mCount > 0 And Left$(mTok(0), 1) = """" Then
+            Dim s As String, i As Long
+            For i = 0 To mCount - 1
+                If Left$(mTok(i), 1) <> """" Then Return Skipped("unsupported expression")
+                s &= DecodeString(mTok(i))
+                If Len(mProblem) > 0 Then Return Skipped(mProblem)
+            Next
+            Dim r As New MacroValue
+            r.Kind = "string"
+            r.StrValue = s
+            Return r
+        End If
+        mPos = 0
+        Dim v As MacroValue = ParseOr()
+        If v.Kind = "skipped" Then Return v
+        If mPos < mCount Then Return Skipped("unsupported expression (at '" & mTok(mPos) & "')")
+        Return v
+    End Function
+
+    ' ---- tokenizer ---------------------------------------------------------------------
+
+    Private Sub AddTok(ByVal t As String)
+        If mCount > UBound(mTok) Then ReDim Preserve mTok(0 To 2 * mCount)
+        mTok(mCount) = t
+        mCount += 1
+    End Sub
+
+    Private Sub Tokenize(ByVal s As String)
+        ReDim mTok(0 To 15)
+        mCount = 0
+        Dim i As Long = 1
+        Dim c As String, j As Long, two As String
+        Do While i <= Len(s)
+            c = Mid$(s, i, 1)
+            If c = " " Or c = vbTab Then
+                i += 1
+            ElseIf c Like "[0-9]" Or (c = "." And Mid$(s, i + 1, 1) Like "[0-9]") Then
+                j = i
+                Do While j <= Len(s)
+                    If Not (Mid$(s, j, 1) Like "[0-9A-Za-z_.]") Then Exit Do
+                    j += 1
+                Loop
+                AddTok Mid$(s, i, j - i)
+                i = j
+            ElseIf c Like "[A-Za-z_]" Then
+                j = i + IdentLength(s, i)
+                AddTok Mid$(s, i, j - i)
+                i = j
+            ElseIf c = "'" Or c = """" Then
+                j = i + 1
+                Do While j <= Len(s)
+                    If Mid$(s, j, 1) = "\" Then
+                        j += 2
+                    ElseIf Mid$(s, j, 1) = c Then
+                        Exit Do
+                    Else
+                        j += 1
+                    End If
+                Loop
+                If j > Len(s) Then
+                    mProblem = "unterminated literal"
+                    Exit Sub
+                End If
+                AddTok Mid$(s, i, j - i + 1)
+                i = j + 1
+            Else
+                two = Mid$(s, i, 2)
+                Select Case two
+                    Case "<<", ">>", "&&", "||", "==", "!=", "<=", ">="
+                        AddTok two
+                        i += 2
+                    Case Else
+                        If InStr("+-*/%&|^~!()<>", c) > 0 Then
+                            AddTok c
+                            i += 1
+                        Else
+                            mProblem = "unsupported character '" & c & "'"
+                            Exit Sub
+                        End If
+                End Select
+            End If
+        Loop
+    End Sub
+
+    ' ---- literals ----------------------------------------------------------------------
+
+    Private Function NumberToken(ByVal t As String) As MacroValue
+        Dim lower As String = LCase$(t)
+        If (InStr(lower, ".") > 0 Or (Left$(lower, 2) <> "0x" And InStr(lower, "e") > 0)) Then
+            Dim d As New MacroValue
+            d.Kind = "double"
+            d.DblValue = Val(Replace(Replace(lower, "f", ""), "l", ""))
+            Return d
+        End If
+        Dim isUnsigned As Boolean, longs As Long
+        ' MSVC sized suffixes: i8 i16 i32 i64, ui8 ui16 ui32 ui64 (libgit2's stdint.h uses them).
+        ' i8/i16/ui8/ui16 promote to int; i32 is int; ui32 unsigned int; i64 long long;
+        ' ui64 unsigned long long.
+        Dim sized As Long = 0
+        Dim iAt As Long = InStrRev(lower, "i")
+        If iAt > 1 And Left$(lower, 2) <> "0x" Or (iAt > 2 And Left$(lower, 2) = "0x") Then
+            Select Case Mid$(lower, iAt)
+                Case "i8", "i16", "i32", "i64"
+                    sized = CLng(Mid$(lower, iAt + 1))
+                    If Mid$(lower, iAt - 1, 1) = "u" Then
+                        isUnsigned = (sized >= 32)
+                        lower = Left$(lower, iAt - 2)
+                    Else
+                        lower = Left$(lower, iAt - 1)
+                    End If
+            End Select
+        End If
+        Do While sized = 0 And Len(lower) > 0 And InStr("ul", Right$(lower, 1)) > 0
+            If Right$(lower, 1) = "u" Then isUnsigned = True Else longs += 1
+            lower = Left$(lower, Len(lower) - 1)
+        Loop
+        Dim radix As Long = 10
+        Dim digits As String = lower
+        If Left$(lower, 2) = "0x" Then
+            radix = 16
+            digits = Mid$(lower, 3)
+        ElseIf Len(lower) > 1 And Left$(lower, 1) = "0" Then
+            radix = 8
+            digits = Mid$(lower, 2)
+        End If
+        Dim acc As Variant = CDec(0)
+        Dim i As Long, dv As Long
+        For i = 1 To Len(digits)
+            dv = InStr("0123456789abcdef", Mid$(digits, i, 1)) - 1
+            If dv < 0 Or dv >= radix Then Return Skipped("bad number " & t)
+            acc = acc * radix + dv
+        Next
+        ' C typing (Windows: long is 32 bits)
+        Dim bits As Long = 32
+        Dim maxInt As Variant = CDec(2147483647)
+        Dim maxUInt As Variant = CDec(4294967295#)
+        Dim maxLL As Variant = CDec("9223372036854775807")
+        If sized = 64 Then
+            bits = 64
+        ElseIf sized > 0 Then
+            bits = 32
+        ElseIf longs >= 2 Then
+            bits = 64
+        ElseIf isUnsigned Then
+            If acc > maxUInt Then bits = 64
+        ElseIf radix = 10 Then
+            If acc > maxInt Then bits = 64
+        Else
+            If acc > maxInt Then
+                If acc <= maxUInt Then isUnsigned = True Else bits = 64
+            End If
+        End If
+        If bits = 64 And acc > maxLL Then
+            isUnsigned = True
+            acc = acc - CDec("18446744073709551616")
+        End If
+        Return IntOf(CLngLng(acc), bits, isUnsigned)
+    End Function
+
+    Private Function EscapeValue(ByVal s As String, ByRef i As Long) As Long
+        ' s(i) is the character after the backslash; advances i past the escape
+        Dim c As String = Mid$(s, i, 1)
+        i += 1
+        Select Case c
+            Case "n": Return 10
+            Case "t": Return 9
+            Case "r": Return 13
+            Case "0" To "7"
+                Dim v As Long = CLng(c)
+                Dim k As Long
+                For k = 1 To 2
+                    If Mid$(s, i, 1) Like "[0-7]" Then
+                        v = v * 8 + CLng(Mid$(s, i, 1))
+                        i += 1
+                    End If
+                Next
+                Return v
+            Case "x"
+                Dim h As String
+                Do While Mid$(s, i, 1) Like "[0-9A-Fa-f]"
+                    h &= Mid$(s, i, 1)
+                    i += 1
+                Loop
+                Return CLng("&H" & h)
+            Case "a": Return 7
+            Case "b": Return 8
+            Case "f": Return 12
+            Case "v": Return 11
+        End Select
+        Return AscW(c)
+    End Function
+
+    Private Function CharToken(ByVal t As String) As MacroValue
+        Dim inner As String = Mid$(t, 2, Len(t) - 2)
+        If Len(inner) = 0 Then Return Skipped("empty char literal")
+        If Left$(inner, 1) = "\" Then
+            Dim i As Long = 2
+            Return IntOf(EscapeValue(inner, i), 32, False)
+        End If
+        Return IntOf(AscW(inner), 32, False)
+    End Function
+
+    ' A C string literal as text; only \" and \\ can be written in a tB constant.
+    Private Function DecodeString(ByVal t As String) As String
+        Dim inner As String = Mid$(t, 2, Len(t) - 2)
+        Dim r As String, c As String
+        Dim i As Long = 1
+        Do While i <= Len(inner)
+            c = Mid$(inner, i, 1)
+            If c = "\" Then
+                Dim e As String = Mid$(inner, i + 1, 1)
+                If e = """" Or e = "\" Or e = "'" Then
+                    r &= e
+                    i += 2
+                Else
+                    mProblem = "string escape \" & e & " cannot be written in a tB constant"
+                    Return ""
+                End If
+            Else
+                r &= c
+                i += 1
+            End If
+        Loop
+        Return r
+    End Function
+
+    ' ---- parser (C precedence) ---------------------------------------------------------------
+
+    Private Function Peek() As String
+        If mPos < mCount Then Return mTok(mPos)
+        Return ""
+    End Function
+
+    Private Function Bin(ByVal op As String, a As MacroValue, b As MacroValue) As MacroValue
+        If a.Kind = "skipped" Then Return a
+        If b.Kind = "skipped" Then Return b
+        If a.Kind = "string" Or b.Kind = "string" Then Return Skipped("unsupported expression (string operand)")
+        If a.Kind = "double" Or b.Kind = "double" Then
+            Dim x As Double = If(a.Kind = "double", a.DblValue, CDbl(a.IntValue))
+            Dim y As Double = If(b.Kind = "double", b.DblValue, CDbl(b.IntValue))
+            Dim d As New MacroValue
+            d.Kind = "double"
+            Select Case op
+                Case "+": d.DblValue = x + y
+                Case "-": d.DblValue = x - y
+                Case "*": d.DblValue = x * y
+                Case "/"
+                    If y = 0 Then Return Skipped("division by zero")
+                    d.DblValue = x / y
+                Case Else: Return Skipped("unsupported expression (" & op & " on a double)")
+            End Select
+            Return d
+        End If
+        ' usual arithmetic conversions
+        Dim bits As Long = If(a.Bits > b.Bits, a.Bits, b.Bits)
+        Dim uns As Boolean
+        If a.Bits = b.Bits Then
+            uns = a.IsUnsigned Or b.IsUnsigned
+        ElseIf a.Bits > b.Bits Then
+            uns = a.IsUnsigned
+        Else
+            uns = b.IsUnsigned
+        End If
+        Dim p As LongLong = a.IntValue
+        Dim q As LongLong = b.IntValue
+        On Error GoTo Overflow
+        Select Case op
+            Case "+": Return IntOf(p + q, bits, uns)
+            Case "-": Return IntOf(p - q, bits, uns)
+            Case "*": Return IntOf(p * q, bits, uns)
+            Case "/"
+                If q = 0 Then Return Skipped("division by zero")
+                Return IntOf(p \ q, bits, uns)
+            Case "%"
+                If q = 0 Then Return Skipped("division by zero")
+                Return IntOf(p Mod q, bits, uns)
+            Case "&": Return IntOf(p And q, bits, uns)
+            Case "|": Return IntOf(p Or q, bits, uns)
+            Case "^": Return IntOf(p Xor q, bits, uns)
+            Case "<<"
+                If q < 0 Or q >= a.Bits Then Return Skipped("shift out of range")
+                Dim m As LongLong = p
+                If a.Bits = 32 Then m = m And Mask32()
+                Return IntOf(m * CLngLng(2 ^ q), a.Bits, a.IsUnsigned)
+            Case ">>"
+                If q < 0 Or q >= a.Bits Then Return Skipped("shift out of range")
+                If p < 0 And Not a.IsUnsigned Then Return IntOf(-((-p - 1) \ CLngLng(2 ^ q)) - 1, a.Bits, False)
+                Return IntOf(p \ CLngLng(2 ^ q), a.Bits, a.IsUnsigned)
+            Case "==": Return IntOf(If(p = q, 1, 0), 32, False)
+            Case "!=": Return IntOf(If(p <> q, 1, 0), 32, False)
+            Case "<": Return IntOf(If(p < q, 1, 0), 32, False)
+            Case ">": Return IntOf(If(p > q, 1, 0), 32, False)
+            Case "<=": Return IntOf(If(p <= q, 1, 0), 32, False)
+            Case ">=": Return IntOf(If(p >= q, 1, 0), 32, False)
+            Case "&&": Return IntOf(If(p <> 0 And q <> 0, 1, 0), 32, False)
+            Case "||": Return IntOf(If(p <> 0 Or q <> 0, 1, 0), 32, False)
+        End Select
+        Return Skipped("unsupported operator " & op)
+    Overflow:
+        Return Skipped("64-bit overflow in " & op)
+    End Function
+
+    Private Function ParseLevel(ByVal level As Long) As MacroValue
+        ' levels: 0 ||, 1 &&, 2 |, 3 ^, 4 &, 5 == !=, 6 < > <= >=, 7 << >>, 8 + -, 9 * / %
+        If level > 9 Then Return ParseUnary()
+        Dim ops As String = Choose(level + 1, " || ", " && ", " | ", " ^ ", " & ", " == != ", " < > <= >= ", " << >> ", " + - ", " * / % ")
+        Dim v As MacroValue = ParseLevel(level + 1)
+        Do While mPos < mCount And InStr(ops, " " & Peek() & " ") > 0
+            Dim op As String = Peek()
+            mPos += 1
+            Set v = Bin(op, v, ParseLevel(level + 1))
+        Loop
+        Return v
+    End Function
+
+    Private Function ParseOr() As MacroValue
+        Return ParseLevel(0)
+    End Function
+
+    ' A cast "(int)", "(unsigned int)", "(long long)" ...: returns bits*10+unsigned, or 0.
+    Private Function CastAt(ByVal pos As Long, ByRef endPos As Long) As Long
+        Dim i As Long = pos + 1
+        Dim words As String, w As String
+        Do While i < mCount
+            w = mTok(i)
+            If w = ")" Then Exit Do
+            Select Case w
+                Case "int", "unsigned", "signed", "long", "short", "char", "__int64"
+                    words &= " " & w
+                Case Else
+                    Return 0
+            End Select
+            i += 1
+        Loop
+        If i >= mCount Or Len(words) = 0 Then Return 0
+        endPos = i
+        Dim bits As Long = If(InStr(words, "long long") > 0 Or InStr(words, "__int64") > 0, 64, 32)
+        Return bits * 10 + If(InStr(words, "unsigned") > 0, 1, 0)
+    End Function
+
+    Private Function ParseUnary() As MacroValue
+        Dim t As String = Peek()
+        Dim v As MacroValue
+        Select Case t
+            Case "-", "+", "~", "!"
+                mPos += 1
+                Set v = ParseUnary()
+                If v.Kind = "skipped" Then Return v
+                If v.Kind = "double" Then
+                    If t = "-" Then v.DblValue = -v.DblValue
+                    If t = "~" Or t = "!" Then Return Skipped("unsupported expression (" & t & " on a double)")
+                    Return v
+                End If
+                If v.Kind <> "integer" Then Return Skipped("unsupported expression")
+                Select Case t
+                    Case "-": Return IntOf(-v.IntValue, v.Bits, v.IsUnsigned)
+                    Case "+": Return v
+                    Case "~": Return IntOf(Not v.IntValue, v.Bits, v.IsUnsigned)
+                    Case "!": Return IntOf(If(v.IntValue = 0, 1, 0), 32, False)
+                End Select
+            Case "("
+                Dim endPos As Long
+                Dim cast As Long = CastAt(mPos, endPos)
+                If cast > 0 Then
+                    mPos = endPos + 1
+                    Set v = ParseUnary()
+                    If v.Kind <> "integer" Then Return v
+                    Return IntOf(v.IntValue, cast \ 10, (cast Mod 10) = 1)
+                End If
+                mPos += 1
+                Set v = ParseOr()
+                If Peek() <> ")" Then Return Skipped("unsupported expression (missing ')')")
+                mPos += 1
+                Return v
+        End Select
+        Return ParsePrimary()
+    End Function
+
+    Private Function ParsePrimary() As MacroValue
+        If mPos >= mCount Then Return Skipped("unsupported expression (unexpected end)")
+        Dim t As String = mTok(mPos)
+        mPos += 1
+        Dim c As String = Left$(t, 1)
+        If c Like "[0-9.]" Then Return NumberToken(t)
+        If c = "'" Then Return CharToken(t)
+        If c = """" Then Return Skipped("unsupported expression (string in an expression)")
+        If c Like "[A-Za-z_]" Then
+            If mBodies.Exists(t) Then
+                ' evaluate the referenced macro with its own token state
+                Dim savedTok() As String = mTok
+                Dim savedPos As Long = mPos
+                Dim savedCount As Long = mCount
+                Dim r As MacroValue = Evaluate(t)
+                mTok = savedTok
+                mPos = savedPos
+                mCount = savedCount
+                Return r
+            End If
+            If mEnumValues.Exists(t) Then Return IntOf(mEnumValues(t), mEnumBits(t), False)
+            If mTypeNames.Exists(t) Then Return Skipped("names a type (" & t & "), not a constant (a type alias written as a macro)")
+            Return Skipped("unknown identifier " & t)
+        End If
+        Return Skipped("unsupported expression (at '" & t & "')")
+    End Function
+
+    ' ---- tB text -------------------------------------------------------------------------
+
+    ' "As Long = 42", "As Long = &H80000000", "As LongLong = 1234567890123^",
+    ' "As Double = 2.5", "As String = ""a""""b""" -- or "" when the value is skipped.
+    Public Function TbConstTail(v As MacroValue) As String
+        Select Case v.Kind
+            Case "integer"
+                ' tB reads -9223372036854775808^ as -(9223372036854775808^), which overflows: hex instead.
+                If v.Bits = 64 And v.IntValue < -9223372036854775807^ Then Return "As LongLong = &H8000000000000000^"
+                If v.Bits = 64 Then Return "As LongLong = " & CStr(v.IntValue) & "^"
+                If v.IntValue >= -2147483647 And v.IntValue <= 2147483647 Then Return "As Long = " & CStr(v.IntValue)
+                Return "As Long = &H" & Right$("00000000" & Hex$(v.IntValue And Mask32()), 8)
+            Case "double"
+                Return "As Double = " & Trim$(Str$(v.DblValue))
+            Case "string"
+                Return "As String = """ & Replace(v.StrValue, """", """""") & """"
+        End Select
+        Return ""
+    End Function
+End Class

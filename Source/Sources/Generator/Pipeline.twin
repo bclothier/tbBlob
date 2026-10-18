@@ -1,0 +1,122 @@
+' The whole generation (PRD section 6, req. 5-32; D-023): CastXML into <output>\Work\, then
+' GenerateFrom: load both models, check x86/x64, read macros, map names, emit, write
+' <output>\report.md and <output>\Source\. One console progress line per stage.
+Module Pipeline
+    ' Why the last run failed ("" when it did not).
+    Public LastError As String
+
+    ' TEST HOOK: when set, the emitter raises a forced error on the item with this C name, so tests
+    ' can check that failures name the item (errors carry context to the top).
+    Public TestFailOn As String
+
+    Private Sub Progress(ByVal text As String)
+        Console.WriteOut "tbBlob: " & text
+    End Sub
+
+    Private Function Fail(ByVal text As String, ByVal code As Long) As Long
+        LastError = text
+        Console.WriteErr "ERROR: " & text
+        Return code
+    End Function
+
+    ' Runs CastXML for o into <o.OutputFolder>\Work\, then GenerateFrom. Returns the exit code.
+    Public Function Generate(o As CliOptions) As Long
+        LastError = ""
+        Dim outputFolder As String = FileSys.FullPath(o.OutputFolder)
+        Progress "running CastXML (x86, x64, macro dump) into " & outputFolder & "\Work"
+        Dim r As CastXmlResult = CastXmlRunner.RunCastXml(o, outputFolder & "\Work")
+        If r.ExitCode <> 0 Then Return Fail(r.ErrorText, r.ExitCode)
+        Dim exports As Collection
+        If Len(o.X86DllPath) > 0 Then
+            Progress "reading the export names of " & o.X86DllPath
+            On Error GoTo ExportsFailed
+            Set exports = PeExports.ExportNames(o.X86DllPath)
+            On Error GoTo 0
+        End If
+        Return GenerateFrom(r.Xml86Path, r.Xml64Path, r.Macros86Path, r.Macros64Path, o.HeaderFolder, o.DllName, o.ProjectName, outputFolder, exports)
+    ExportsFailed:
+        Return Fail("--x86-dll: " & Err.Description, MainModule.EXIT_FAILED)
+    End Function
+
+    ' Everything after CastXML, from its four output files (x86Exports: see Emitter.X86Exports). Returns the exit code: 0 done,
+    ' 1 failed (LastError says why; an x86/x64 disagreement writes nothing).
+    Public Function GenerateFrom(ByVal xml86 As String, ByVal xml64 As String, ByVal macros86File As String, ByVal macros64File As String, ByVal headerFolder As String, ByVal dllName As String, ByVal projectName As String, ByVal outputFolder As String, Optional ByVal x86Exports As Collection = Nothing) As Long
+        LastError = ""
+        Dim m86 As New CxModel
+        Dim m64 As New CxModel
+        Dim map64 As TypeMapper
+        Dim e As Emitter
+        Dim stage As String
+
+        stage = "loading CastXML output (x86, x64)"
+        Progress stage
+        On Error GoTo LoadFailed86
+        m86.Load xml86, headerFolder
+        On Error GoTo LoadFailed64
+        m64.Load xml64, headerFolder
+        On Error GoTo Failed
+
+        Dim map86 As New TypeMapper
+        map86.Init m86
+        Set map64 = New TypeMapper
+        map64.Init m64
+
+        stage = "checking x86/x64 consistency"
+        Progress stage
+        Dim d As Collection = map64.Disagreements(map86)
+        If d.Count > 0 Then
+            Dim text As String = "x86 and x64 disagree in ways one tB source cannot express (nothing written):"
+            Dim line As Variant
+            For Each line In d
+                text &= vbLf & "  " & line
+            Next
+            Return Fail(text, MainModule.EXIT_FAILED)
+        End If
+
+        stage = "reading macros"
+        Progress stage
+        Dim macros As New MacroTable
+        macros.ParseDump FileSys.ReadTextUtf8(macros64File)
+        macros.ScanLibrary headerFolder
+        Dim macros86 As New MacroTable
+        macros86.ParseDump FileSys.ReadTextUtf8(macros86File)
+        macros86.ScanLibrary headerFolder
+
+        stage = "mapping names"
+        Progress stage
+        Set e = New Emitter
+        e.FailOn = TestFailOn
+        Set e.X86Exports = x86Exports
+        e.Init map64, map86, macros, dllName, headerFolder, projectName
+        e.UseX86Macros macros86
+
+        stage = "generating .twin modules"
+        Progress stage
+        e.Generate
+
+        Dim outFull As String = FileSys.FullPath(outputFolder)
+        stage = "writing " & outFull
+        Progress stage
+        ProjectWriter.WriteOutput outFull, e
+
+        Console.WriteOut "tbBlob: done: " & e.ModuleNames().Count & " modules, " & e.CountOf("functions") & " functions, " & _
+            e.CountOf("types") & " types, " & e.CountOf("enums") & " enums, " & e.CountOf("delegates") & " delegates, " & _
+            e.CountOf("constants") & " constants (" & e.CountOf("macros skipped") & " macros skipped)"
+        Console.WriteOut "tbBlob: read " & outFull & "\report.md first"
+        Return MainModule.EXIT_OK
+
+    LoadFailed86:
+        Return Fail(If(Len(m86.LoadError) > 0, m86.LoadError, Err.Description), MainModule.EXIT_FAILED)
+    LoadFailed64:
+        Return Fail(If(Len(m64.LoadError) > 0, m64.LoadError, Err.Description), MainModule.EXIT_FAILED)
+    Failed:
+        ' errors carry context to the top: the stage, the item, and the original message
+        Dim why As String = Err.Description
+        If Not e Is Nothing Then
+            If Len(e.ErrorText) > 0 Then why = e.ErrorText
+        ElseIf Not map64 Is Nothing Then
+            If Len(map64.CurrentItem) > 0 Then why &= " (while checking " & map64.CurrentItem & ")"
+        End If
+        Return Fail(stage & " failed: " & why, MainModule.EXIT_FAILED)
+    End Function
+End Module

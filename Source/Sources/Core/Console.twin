@@ -1,0 +1,101 @@
+' Console output (UTF-8 when redirected), command-line splitting, and an output capture for tests.
+' WriteOut/WriteTo are ported from tools\impexp\impexp.twinproj (MainModule).
+Module Console
+    Private Declare PtrSafe Function GetStdHandle Lib "kernel32" (ByVal nStdHandle As Long) As LongPtr
+    Private Declare PtrSafe Function GetConsoleMode Lib "kernel32" (ByVal hConsoleHandle As LongPtr, ByRef lpMode As Long) As Long
+    Private Declare PtrSafe Function WriteConsoleW Lib "kernel32" (ByVal hConsoleOutput As LongPtr, ByVal lpBuffer As LongPtr, ByVal nNumberOfCharsToWrite As Long, ByRef lpNumberOfCharsWritten As Long, ByVal lpReserved As LongPtr) As Long
+    Private Declare PtrSafe Function WriteFile Lib "kernel32" (ByVal hFile As LongPtr, ByVal lpBuffer As LongPtr, ByVal nNumberOfBytesToWrite As Long, ByRef lpNumberOfBytesWritten As Long, ByVal lpOverlapped As LongPtr) As Long
+    Private Declare PtrSafe Function GetCommandLineW Lib "kernel32" () As LongPtr
+    Private Declare PtrSafe Function CommandLineToArgvW Lib "shell32" (ByVal lpCmdLine As LongPtr, ByRef pNumArgs As Long) As LongPtr
+    Private Declare PtrSafe Function LocalFree Lib "kernel32" (ByVal hMem As LongPtr) As LongPtr
+    Private Declare PtrSafe Function lstrlenW Lib "kernel32" (ByVal lpString As LongPtr) As Long
+    Private Declare PtrSafe Sub RtlMoveMemory Lib "kernel32" (ByVal Destination As LongPtr, ByVal Source As LongPtr, ByVal Length As LongPtr)
+
+    Private Const STD_OUTPUT_HANDLE As Long = -11
+    Private Const STD_ERROR_HANDLE As Long = -12
+
+    Private mCapturing As Boolean
+    Private mCaptured As String
+
+    ' The arguments after the program's name, as the C runtime splits them.
+    Public Function Arguments() As String()
+        Dim all() As String = ArgvOf(Utf16FromPtr(GetCommandLineW()))
+        Dim r() As String
+        Dim i As Long
+        If UBound(all) < 1 Then
+            Return EmptyArray()
+        End If
+        ReDim r(0 To UBound(all) - 1)
+        For i = 1 To UBound(all)
+            r(i - 1) = all(i)
+        Next
+        Return r
+    End Function
+
+    ' Splits a whole command line (program name included) the way CommandLineToArgvW does.
+    Public Function SplitCommandLine(ByVal commandLine As String) As String()
+        Return ArgvOf(commandLine)
+    End Function
+
+    Public Function EmptyArray() As String()
+        Dim r() As String = Split("", " ")
+        Return r
+    End Function
+
+    Public Sub WriteOut(ByVal text As String)
+        WriteTo STD_OUTPUT_HANDLE, text & vbLf
+    End Sub
+
+    Public Sub WriteErr(ByVal text As String)
+        WriteTo STD_ERROR_HANDLE, text & vbLf
+    End Sub
+
+    ' While capturing, WriteOut and WriteErr append to a buffer instead of the console.
+    Public Sub StartCapture()
+        mCapturing = True
+        mCaptured = ""
+    End Sub
+
+    Public Function StopCapture() As String
+        mCapturing = False
+        Return mCaptured
+    End Function
+
+    ' WriteConsoleW writes nothing to a file or a pipe, so redirected output goes through
+    ' WriteFile, as UTF-8.
+    Private Sub WriteTo(ByVal stream As Long, ByVal text As String)
+        Dim handle As LongPtr, mode As Long, written As Long, b() As Byte, n As Long
+        If mCapturing Then
+            mCaptured &= text
+            Exit Sub
+        End If
+        handle = GetStdHandle(stream)
+        If GetConsoleMode(handle, mode) <> 0 Then
+            WriteConsoleW handle, StrPtr(text), Len(text), written, 0
+        Else
+            n = TextKit.Utf8Encode(text, b)
+            If n > 0 Then WriteFile handle, VarPtr(b(0)), n, written, 0
+        End If
+    End Sub
+
+    ' CommandLineToArgvW on any command line (ported from impexp's Arguments).
+    Private Function ArgvOf(ByVal commandLine As String) As String()
+        Dim argv As LongPtr, argc As Long, i As Long, p As LongPtr, r() As String
+        argv = CommandLineToArgvW(StrPtr(commandLine), argc)
+        If argc = 0 Then Return EmptyArray()
+        ReDim r(0 To argc - 1)
+        For i = 0 To argc - 1
+            RtlMoveMemory VarPtr(p), argv + i * LenB(p), LenB(p)
+            r(i) = Utf16FromPtr(p)
+        Next
+        LocalFree argv
+        Return r
+    End Function
+
+    Private Function Utf16FromPtr(ByVal p As LongPtr) As String
+        Dim n As Long = lstrlenW(p)
+        Dim s As String = String$(n, vbNullChar)
+        If n > 0 Then RtlMoveMemory StrPtr(s), p, 2 * n
+        Return s
+    End Function
+End Module

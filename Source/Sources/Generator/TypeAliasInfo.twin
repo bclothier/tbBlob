@@ -1,0 +1,10 @@
+' A type alias tbBlob emits at file scope: Public Alias <Name> As <Target> (PRD req. 15, D-025).
+' From a library typedef that renames a scalar, struct or enum, or from a macro naming a type.
+Class TypeAliasInfo
+    Public Name As String       ' the C name of the alias
+    Public Target As String     ' the tB target type text, e.g. "LongLong /* unsigned */", "TBF_POINT"
+    Public CText As String      ' the C declaration, for the comment
+    Public Element As MSXML2.IXMLDOMElement    ' the Typedef element (Nothing for a macro)
+    Public FromMacro As Boolean
+    Public HeaderPath As String ' the header that declares it (for the module)
+End Class

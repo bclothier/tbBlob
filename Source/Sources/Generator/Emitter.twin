@@ -1,0 +1,940 @@
+' Turns a mapped library into tB source text (PRD req. 10-28): one module per header, with
+' file-scope opaque aliases, then constants, enums, delegates, Types and Declares; doc comments
+' verbatim as /* */ blocks (D-022) plus a "' C:" line; unions as storage + accessors (D-018).
+' Also the layout-check module (req. 34) and the generation report (req. 31). Deterministic.
+Class Emitter
+    ' What is being emitted right now ("delegate tbf_visit_cb (tbfixture.h:191)"), so a failure can
+    ' say where it happened (errors carry context to the top).
+    Public CurrentItem As String
+    ' TEST HOOK: raise a forced error when emitting the item with this C name ("" = never).
+    Public FailOn As String
+    ' The x86 DLL's export names (PeExports.ExportNames, from --x86-dll), or Nothing when not
+    ' given; decides how x86 __stdcall functions are bound (D-026). Set before Generate.
+    Public X86Exports As Collection
+    ' Why Generate failed, captured inside the class with CurrentItem (D-019: an error's text can
+    ' be lost on its way out of a class method); "" when it did not fail.
+    Public ErrorText As String
+
+    Private mMap64 As TypeMapper
+    Private mMap86 As TypeMapper
+    Private mM64 As CxModel
+    Private mM86 As CxModel
+    Private mNames As NameTable
+    Private mMacros As MacroTable
+    Private mMacros86 As MacroTable     ' Nothing: constants from the x64 dump only
+    Private mDll As String
+    Private mHeaderFolder As String
+    Private mProject As String
+
+    ' Keyed tB Collections with case-sensitive keys (D-040).
+    Private mBodies As Collection   ' module -> Collection of body lines (no module indent)
+    Private mScopes As Collection   ' module -> Collection of file-scope lines
+    Private mTitles As Collection   ' module -> header path relative to the header folder
+    Private mLayout As Collection   ' layout-check module body lines
+    Private mLayoutCalls As Collection
+    Private mTbLayout As Collection     ' TbLayout record helpers
+    Private mTbLayoutCases As Collection
+    Private mReport As Collection   ' section -> Collection of "- ..." lines
+    Private mSections As Variant
+    Private mCounts As Collection   ' counter name -> ValueBox holding a Long (updated in place, D-040)
+
+    ' map64/map86: the two architectures' mappers; macros: parsed + scanned (enum values are
+    ' added here); projectName names the layout-check module.
+    Public Sub Init(map64 As TypeMapper, map86 As TypeMapper, macros As MacroTable, ByVal dllName As String, ByVal headerFolder As String, ByVal projectName As String)
+        Set mMap64 = map64
+        Set mMap86 = map86
+        Set mM64 = map64.Model
+        Set mM86 = map86.Model
+        Set mMacros = macros
+        mDll = dllName
+        mHeaderFolder = FileSys.FullPath(headerFolder)
+        mProject = projectName
+        mMacros.AddEnumValues mM64
+        Set mNames = New NameTable
+        Naming.RegisterLibrary mMap64, mNames, mMacros
+    End Sub
+
+    ' The x86 compiler's macros (parsed + scanned), so constants whose value differs by
+    ' architecture become #If Win64 pairs (D-030). Call after Init, before Generate.
+    Public Sub UseX86Macros(macros86 As MacroTable)
+        Set mMacros86 = macros86
+        mMacros86.AddEnumValues mM86
+    End Sub
+
+    ' ---- plumbing ----------------------------------------------------------------------
+
+    Private Function ModuleFor(ByVal headerPath As String) As String
+        Dim name As String = Naming.ModuleName(headerPath, mHeaderFolder, mNames)
+        If Not mBodies.Exists(name) Then
+            mBodies.Add New Collection, name
+            mScopes.Add New Collection, name
+            Dim rel As String = Replace(headerPath, "/", "\")
+            If LCase$(Left$(rel, Len(mHeaderFolder) + 1)) = LCase$(mHeaderFolder & "\") Then rel = Mid$(rel, Len(mHeaderFolder) + 2)
+            mTitles.Add Replace(rel, "\", "/"), name
+        End If
+        Return name
+    End Function
+
+    Private Sub Add(ByVal moduleName As String, ByVal line As String)
+        mBodies(moduleName).Add line
+    End Sub
+
+    Private Sub Rep(ByVal section As String, ByVal line As String)
+        mReport(section).Add "- " & line
+    End Sub
+
+    Private Sub Tally(ByVal what As String, Optional ByVal n As Long = 1)
+        If Not mCounts.Exists(what) Then
+            Dim box As New ValueBox
+            box.Value = 0&
+            mCounts.Add box, what
+        End If
+        Dim counter As ValueBox = mCounts(what)
+        counter.Value = counter.Value + n
+    End Sub
+
+    ' Records what is being emitted (for error messages) and applies the FailOn test hook.
+    Private Sub SetItem(ByVal kind As String, ByVal cName As String, ByVal el As MSXML2.IXMLDOMElement, Optional ByVal headerPath As String = "")
+        Dim where As String = headerPath
+        If Not el Is Nothing Then where = mM64.FileOf(el)
+        If LCase$(Left$(where, Len(mHeaderFolder) + 1)) = LCase$(mHeaderFolder & "\") Then where = Replace(Mid$(where, Len(mHeaderFolder) + 2), "\", "/")
+        If Not el Is Nothing Then
+            If Len(mM64.Attr(el, "line")) > 0 Then where &= ":" & mM64.Attr(el, "line")
+        End If
+        CurrentItem = kind & " " & cName & If(Len(where) > 0, " (" & where & ")", "")
+        If Len(FailOn) > 0 And cName = FailOn Then
+            ErrorText = "forced failure (test hook) on " & CurrentItem
+            Err.Raise vbObjectError + &H1401, , ErrorText
+        End If
+    End Sub
+
+    ' The element's doc comment, verbatim, as lines with an extra indent.
+    Private Sub AddDoc(ByVal moduleName As String, ByVal el As MSXML2.IXMLDOMElement, ByVal indent As String)
+        Dim raw As String = DocComments.DocRaw(mM64, el)
+        If Len(raw) = 0 Then Exit Sub
+        Dim line As Variant
+        For Each line In Split(raw, vbCrLf)
+            Add moduleName, indent & line
+        Next
+    End Sub
+
+    ' A tB type name for a mapped type text: types and delegates take their resolved names.
+    Private Function TbType(ByVal t As String) As String
+        If Len(t) = 0 Then Return ""
+        Dim n As String = mNames.TbName(t, "type")
+        If Len(n) > 0 Then Return n
+        n = mNames.TbName(t, "delegate")
+        If Len(n) > 0 Then Return n
+        Return t
+    End Function
+
+    ' A Long (or LongLong) literal for an integer value: hex bit pattern outside the signed range.
+    Private Function IntLiteral(ByVal value As Variant) As String
+        Dim d As Variant = CDec(value)
+        If d >= CDec(-2147483647) And d <= CDec(2147483647) Then Return CStr(d)
+        If d >= CDec(-2147483648#) And d <= CDec(4294967295#) Then
+            Dim low As LongLong = CLngLng(d) And CLngLng(4294967295#)
+            Return "&H" & Right$("00000000" & Hex$(low), 8)
+        End If
+        Return CStr(d) & "^"
+    End Function
+
+    ' "( _" ... ")" parameter block; names(i) overrides p.Name when given.
+    Private Sub AddParams(ByVal moduleName As String, ByVal head As String, params As Collection, names As Collection, ByVal variadic As Boolean, ByVal tail As String)
+        Dim items As New Collection, i As Long, p As ParamInfo, nm As String
+        For i = 1 To params.Count
+            Set p = params(i)
+            nm = p.Name
+            If Not names Is Nothing Then
+                If i <= names.Count Then nm = names(i)
+            End If
+            If p.IsVaList Then
+                items.Add "ByRef ParamArray " & nm & " As Any()"
+            Else
+                items.Add p.Passing & " " & nm & " As " & TbType(p.TypeText)
+            End If
+        Next
+        If variadic Then
+            Dim varName As String = "args"
+            For i = 1 To params.Count
+                If params(i).Name = "args" Then varName = "varargs"
+            Next
+            items.Add "ByVal ParamArray " & varName & " As Any()"
+        End If
+        If items.Count = 0 Then
+            Add moduleName, head & " ()" & tail
+            Exit Sub
+        End If
+        Add moduleName, head & " ( _"
+        For i = 1 To items.Count
+            Add moduleName, "    " & items(i) & If(i < items.Count, ", _", " _")
+        Next
+        Add moduleName, ")" & tail
+    End Sub
+
+    ' ---- generation ----------------------------------------------------------------------
+
+    ' Builds every module, the layout module and the report.
+    Public Sub Generate()
+        Set mBodies = New Collection
+        mBodies.KeyCompareMode = vbBinaryCompare
+        Set mScopes = New Collection
+        mScopes.KeyCompareMode = vbBinaryCompare
+        Set mTitles = New Collection
+        mTitles.KeyCompareMode = vbBinaryCompare
+        Set mReport = New Collection
+        mReport.KeyCompareMode = vbBinaryCompare
+        Set mCounts = New Collection
+        mCounts.KeyCompareMode = vbBinaryCompare
+        Set mLayout = New Collection
+        Set mLayoutCalls = New Collection
+        Set mTbLayout = New Collection
+        Set mTbLayoutCases = New Collection
+        mSections = Array("Renamed", "Type aliases", "Skipped macros", "Parameter names lost", "Structs passed or returned by value", _
+            "Variadic functions", "stdcall functions", "Declared but not exported", "Architecture-dependent constants", "Packing", "Unions", "Bitfields", "Mapping notes", "x86/x64 disagreements")
+        Dim s As Variant
+        For Each s In mSections
+            mReport.Add New Collection, s
+        Next
+
+        ErrorText = ""
+        CurrentItem = ""
+        On Error GoTo Failed
+        EmitOpaqueAliases
+        EmitTypeAliases
+        EmitConstants
+        EmitEnums
+        EmitDelegates
+        Dim r As MSXML2.IXMLDOMElement
+        For Each r In mM64.Records()
+            EmitType r
+        Next
+        Dim f As MSXML2.IXMLDOMElement
+        For Each f In mM64.Functions()
+            EmitDeclare f
+        Next
+
+        CurrentItem = "the report"
+        Dim line As Variant
+        For Each line In mNames.RenameLog()
+            Rep "Renamed", line
+        Next
+        For Each line In mMap64.Notes
+            Rep "Mapping notes", line
+        Next
+        For Each line In mMap64.Disagreements(mMap86)
+            Rep "x86/x64 disagreements", line
+        Next
+        CurrentItem = ""
+        Exit Sub
+    Failed:
+        ' capture the text here, inside the class, with the item (D-019, errors carry context)
+        If Len(ErrorText) = 0 Then ErrorText = Err.Description & " (while emitting " & CurrentItem & ")"
+        Err.Raise vbObjectError + &H1402, , ErrorText
+    End Sub
+
+    Private Sub EmitOpaqueAliases()
+        Dim a As AliasInfo, m As String
+        For Each a In Naming.OpaqueAliases(mM64)
+            SetItem "opaque alias", a.Name, a.Element
+            m = ModuleFor(mM64.FileOf(a.Element))
+            Dim raw As String = DocComments.DocRaw(mM64, a.Element)
+            If Len(raw) = 0 And a.Name = a.StructName Then
+                ' typedef struct X X: the alias comes from the struct, the comment is on the typedef (D-031)
+                Dim td As MSXML2.IXMLDOMElement = mM64.FindElement("Typedef", a.Name)
+                If Not td Is Nothing Then raw = DocComments.DocRaw(mM64, td)
+            End If
+            If Len(raw) > 0 Then
+                Dim line As Variant
+                For Each line In Split(raw, vbCrLf)
+                    mScopes(m).Add line
+                Next
+            End If
+            If a.Name = a.StructName Then
+                mScopes(m).Add "' C: struct " & a.Name & " (opaque)"
+            Else
+                mScopes(m).Add "' C: typedef struct " & a.StructName & " " & a.Name & " (opaque)"
+            End If
+            mScopes(m).Add "Public Alias " & mNames.TbName(a.Name, "type") & " As LongPtr"
+            Tally "opaque aliases"
+        Next
+    End Sub
+
+    ' Library typedefs that rename a scalar, struct or enum (D-025), at file scope.
+    Private Sub EmitTypeAliases()
+        Dim a As TypeAliasInfo, m As String, line As Variant
+        For Each a In mMap64.TypeAliases()
+            SetItem "type alias", a.Name, a.Element
+            m = ModuleFor(a.HeaderPath)
+            Dim raw As String = DocComments.DocRaw(mM64, a.Element)
+            If Len(raw) > 0 Then
+                For Each line In Split(raw, vbCrLf)
+                    mScopes(m).Add line
+                Next
+            End If
+            mScopes(m).Add "' C: " & DocComments.SafeCommentLine(a.CText)
+            mScopes(m).Add "Public Alias " & mNames.TbName(a.Name, "type") & " As " & TbType(a.Target)
+            Rep "Type aliases", a.Name & " = " & a.Target & " (typedef)"
+            Tally "type aliases"
+        Next
+    End Sub
+
+    ' Library macros as constants (D-021), type aliases (D-025) or report entries. With the x86
+    ' macros (D-030), each is evaluated on both architectures: the same tB text gives one line,
+    ' different text an #If Win64 pair; what one architecture cannot express is skipped.
+    Private Sub EmitConstants()
+        Dim n As Variant, v As MacroValue, tail As String, m As String
+        Dim v86 As MacroValue, tail86 As String
+        Dim seen64 As New Collection        ' the x64 library macro names (keyed, case-sensitive)
+        seen64.KeyCompareMode = vbBinaryCompare
+        For Each n In mMacros.LibraryNames()
+            seen64.Add True, CStr(n)
+            SetItem "constant", n, Nothing, mMacros.HeaderOf(n)
+            Set v = mMacros.Evaluate(n)
+            tail = mMacros.TbConstTail(v)
+            tail86 = tail
+            Set v86 = Nothing
+            If Not mMacros86 Is Nothing Then
+                Set v86 = mMacros86.Evaluate(n)
+                tail86 = mMacros86.TbConstTail(v86)
+            End If
+            If v.Kind = "typealias" And Not v86 Is Nothing Then
+                If v86.Kind <> "typealias" Or v86.StrValue <> v.StrValue Then
+                    Rep "Skipped macros", n & ": names type " & v.StrValue & " on x64 but " & If(v86.Kind = "typealias", "type " & v86.StrValue, "is not a type") & " on x86"
+                    Tally "macros skipped"
+                    GoTo NextMacro
+                End If
+            End If
+            If v.Kind <> "typealias" And Len(tail) > 0 And tail86 <> tail Then
+                If Len(tail86) = 0 Then
+                    Rep "Skipped macros", n & ": a constant on x64 (" & tail & ") but not on x86 (" & v86.Reason & ")"
+                    Tally "macros skipped"
+                Else
+                    m = ModuleFor(mMacros.HeaderOf(n))
+                    Add m, "#If Win64 Then"
+                    Add m, "Public Const " & mNames.TbName(n, "const") & " " & tail & "  ' C: " & DocComments.SafeCommentLine("#define " & n & " " & mMacros.Body(n))
+                    Add m, "#Else"
+                    Add m, "Public Const " & mNames.TbName(n, "const") & " " & tail86 & "  ' C: " & DocComments.SafeCommentLine("#define " & n & " " & mMacros86.Body(n))
+                    Add m, "#End If"
+                    Rep "Architecture-dependent constants", n & ": x86 " & tail86 & ", x64 " & tail
+                    Tally "constants"
+                End If
+                GoTo NextMacro
+            End If
+            If v.Kind <> "typealias" And Len(tail) = 0 And Len(tail86) > 0 Then
+                Rep "Skipped macros", n & ": a constant on x86 (" & tail86 & ") but not on x64 (" & v.Reason & ")"
+                Tally "macros skipped"
+                GoTo NextMacro
+            End If
+            If v.Kind = "typealias" Then
+                ' a type alias written as a macro (D-025): file-scope Alias in the macro's module
+                m = ModuleFor(mMacros.HeaderOf(n))
+                mScopes(m).Add "' C: " & DocComments.SafeCommentLine("#define " & n & " " & mMacros.Body(n))
+                mScopes(m).Add "Public Alias " & mNames.TbName(n, "type") & " As " & TbType(v.StrValue)
+                Rep "Type aliases", n & " = " & v.StrValue & " (macro)"
+                Tally "type aliases"
+            ElseIf Len(tail) = 0 Then
+                Rep "Skipped macros", n & ": " & v.Reason
+                Tally "macros skipped"
+            Else
+                m = ModuleFor(mMacros.HeaderOf(n))
+                Add m, "Public Const " & mNames.TbName(n, "const") & " " & tail & "  ' C: " & DocComments.SafeCommentLine("#define " & n & " " & mMacros.Body(n))
+                Tally "constants"
+            End If
+    NextMacro:
+        Next
+        If Not mMacros86 Is Nothing Then
+            For Each n In mMacros86.LibraryNames()
+                If Not seen64.Exists(n) Then
+                    Set v86 = mMacros86.Evaluate(n)
+                    tail86 = mMacros86.TbConstTail(v86)
+                    Rep "Skipped macros", n & ": defined on x86 only" & If(Len(tail86) > 0, " (" & tail86 & ")", "") & "; one tB source cannot have it on x64"
+                    Tally "macros skipped"
+                End If
+            Next
+        End If
+        Dim k As Variant
+        For Each k In mBodies.Keys()
+            If mBodies(k).Count > 0 Then Add k, ""
+        Next
+    End Sub
+
+    Private Sub EmitEnums()
+        Dim e As MSXML2.IXMLDOMElement, child As MSXML2.IXMLDOMElement, m As String, comment As String
+        For Each e In mM64.Enumerations()
+            SetItem "enum", mM64.NameOf(e), e
+            m = ModuleFor(mM64.FileOf(e))
+            AddDoc m, e, ""
+            Add m, "' C: enum " & mM64.NameOf(e)
+            Add m, "Public Enum " & mNames.TbName(mM64.NameOf(e), "type")
+            For Each child In e.childNodes
+                If child.nodeName = "EnumValue" Then
+                    comment = DocComments.EnumValueComment(mM64, e, mM64.Attr(child, "name"))
+                    Add m, "    " & mNames.TbName(mM64.Attr(child, "name"), "enumvalue") & " = " & IntLiteral(mM64.Attr(child, "init")) & _
+                        If(Len(comment) > 0, "  ' " & DocComments.SafeCommentLine(comment), "")
+                    Tally "enum values"
+                End If
+            Next
+            Add m, "End Enum"
+            Add m, ""
+            Tally "enums"
+        Next
+    End Sub
+
+    ' The FunctionType a function-pointer typedef or field type points to, through any chain of
+    ' typedefs (libgit2: typedef git_credential_acquire_cb git_cred_acquire_cb;).
+    Private Function PointeeFn(m As CxModel, ByVal typeId As String) As MSXML2.IXMLDOMElement
+        Dim ptr As MSXML2.IXMLDOMElement = m.Strip(typeId)
+        Do While m.Tag(ptr) = "Typedef"
+            Set ptr = m.Strip(m.Attr(ptr, "type"))
+        Loop
+        If m.Tag(ptr) <> "PointerType" Then Return Nothing
+        Dim fn As MSXML2.IXMLDOMElement = m.Strip(m.Attr(ptr, "type"))
+        If m.Tag(fn) <> "FunctionType" Then Return Nothing
+        Return fn
+    End Function
+
+    ' The typedef in a chain that actually declares the parameter list: for
+    ' typedef tbf_visit_cb tbf_visit_alias_cb; that is tbf_visit_cb, where the names are.
+    Private Function DeclaringTypedef(ByVal td As MSXML2.IXMLDOMElement) As MSXML2.IXMLDOMElement
+        Dim t As MSXML2.IXMLDOMElement = mM64.Strip(mM64.Attr(td, "type"))
+        Do While mM64.Tag(t) = "Typedef"
+            Set td = t
+            Set t = mM64.Strip(mM64.Attr(td, "type"))
+        Loop
+        Return td
+    End Function
+
+    Private Sub EmitDelegates()
+        Dim td As MSXML2.IXMLDOMElement, fn As MSXML2.IXMLDOMElement, fn86 As MSXML2.IXMLDOMElement, m As String, lost As String, names As Collection
+        For Each td In mM64.Typedefs()
+            If mMap64.Classify(mM64.Attr(td, "id")).Kind = "delegate" Then
+                SetItem "delegate", mM64.Attr(td, "name"), td
+                Set fn = PointeeFn(mM64, mM64.Attr(td, "id"))
+                Set fn86 = Nothing
+                Dim td86 As MSXML2.IXMLDOMElement = mMap86.FindTypedef(mM64.Attr(td, "name"))
+                If Not td86 Is Nothing Then Set fn86 = PointeeFn(mM86, mM86.Attr(td86, "id"))
+                m = ModuleFor(mM64.FileOf(td))
+                Set names = DocComments.ParamNamesFor(mM64, DeclaringTypedef(td), mMap64.ParamsOf(fn).Count, lost)
+                If Len(lost) > 0 Then Rep "Parameter names lost", mM64.Attr(td, "name") & ": " & lost
+                AddDoc m, td, ""
+                Add m, "' C: " & mM64.Attr(td, "name") & " = " & mMap64.CTypeText(mM64.Attr(td, "type"))
+                EmitDelegateLine m, mNames.TbName(mM64.Attr(td, "name"), "delegate"), fn, fn86, names
+                Tally "delegates"
+            End If
+        Next
+        Dim s As SynthDelegate
+        For Each s In mMap64.SynthDelegates
+            SetItem "delegate", s.Name, s.Source
+            Set fn86 = Nothing
+            Set names = Nothing
+            If s.Source Is Nothing Or s.FromParam Then
+                m = ModuleFor(mM64.FileOf(mMap64.FindFunction(s.Owner)))
+                Rep "Parameter names lost", s.Name & ": declared inline in a parameter list of " & s.Owner & "; its parameter names are not recovered"
+            Else
+                m = ModuleFor(mM64.FileOf(s.Source))
+                Set names = DocComments.ParamNamesFor(mM64, s.Source, mMap64.ParamsOf(s.FnType).Count, lost)
+                If Len(lost) > 0 Then Rep "Parameter names lost", s.Name & ": " & lost
+                Dim r86 As MSXML2.IXMLDOMElement = mMap86.FindRecord(s.Owner)
+                If Not r86 Is Nothing Then
+                    Dim id As Variant, f86 As MSXML2.IXMLDOMElement
+                    For Each id In Split(mM86.Attr(r86, "members"), " ")
+                        Set f86 = mM86.ById(id)
+                        If mM86.Attr(f86, "name") = mM64.Attr(s.Source, "name") Then Set fn86 = PointeeFn(mM86, mM86.Attr(f86, "type"))
+                    Next
+                End If
+            End If
+            Add m, "' C: " & s.Owner & "." & mM64.Attr(s.Source, "name") & " = " & mMap64.CTypeText(mM64.Attr(s.FnType, "id"))
+            EmitDelegateLine m, mNames.TbName(s.Name, "delegate"), s.FnType, fn86, names
+            Tally "delegates"
+            Tally "synthesized delegates"
+        Next
+    End Sub
+
+    Private Sub EmitDelegateLine(ByVal m As String, ByVal tbName As String, ByVal fn As MSXML2.IXMLDOMElement, ByVal fn86 As MSXML2.IXMLDOMElement, names As Collection)
+        Dim ret As String = TbType(mMap64.ReturnOf(fn))
+        Dim cc As String = If(fn86 Is Nothing, "CDecl", mMap86.CallConvOf(fn86))
+        AddParams m, "Public Delegate " & If(Len(ret) = 0, "Sub", "Function") & " " & tbName & If(Len(cc) > 0, " " & cc, ""), _
+            mMap64.ParamsOf(fn), names, False, If(Len(ret) > 0, " As " & ret, "")
+        Add m, ""
+    End Sub
+
+    Private Sub EmitType(ByVal r As MSXML2.IXMLDOMElement)
+        Dim cname As String = mM64.NameOf(r)
+        SetItem LCase$(mM64.Tag(r)), cname, r
+        Dim tb As String = mNames.TbName(cname, "type")
+        Dim m As String = ModuleFor(mM64.FileOf(r))
+        Dim r86 As MSXML2.IXMLDOMElement = mMap86.FindRecord(cname)
+        Dim pack As Long = mMap64.Packing(r)
+        If Len(DocComments.DocRaw(mM64, r)) = 0 Then
+            ' typedef struct X X documented, struct X { ... } not (git_transport): the typedef's doc (D-034)
+            Dim td As MSXML2.IXMLDOMElement = mM64.FindElement("Typedef", cname)
+            AddDoc m, If(td Is Nothing, r, td), ""
+        Else
+            AddDoc m, r, ""
+        End If
+        Add m, "' C: " & LCase$(If(mM64.Tag(r) = "Union", "union", "struct")) & " " & cname & " (" & If(r86 Is Nothing, "?", CStr(mM86.SizeBytes(r86))) & " bytes on x86, " & mM64.SizeBytes(r) & " on x64)"
+        If pack > 0 Then
+            Add m, "[PackingAlignment(" & pack & ")]"
+            Rep "Packing", cname & ": [PackingAlignment(" & pack & ")]"
+        ElseIf pack < 0 Then
+            Add m, "' NOTE: over-aligned (__declspec(align)): tB cannot express this alignment; the layout check skips it."
+            Rep "Packing", cname & ": over-aligned (__declspec(align)); cannot be expressed in tB; layout check skipped"
+        End If
+        Add m, "Public Type " & tb
+        Dim fields As Collection = mMap64.FieldsOf(r)
+        Dim fi As FieldInfo, storage As FieldInfo, accessors As New Collection, storages As New Collection
+        For Each fi In fields
+            Select Case fi.Kind
+                Case "field"
+                    Dim raw As String = DocComments.DocRaw(mM64, fi.Element)
+                    Dim trailing As String = ""
+                    If Left$(raw, 4) = "/**<" And InStr(raw, vbCrLf) = 0 Then
+                        trailing = " " & raw
+                    ElseIf Len(raw) > 0 Then
+                        Dim line As Variant
+                        For Each line In Split(raw, vbCrLf)
+                            Add m, "    " & line
+                        Next
+                    End If
+                    Add m, "    " & fi.Name & fi.Bounds & " As " & TbType(fi.TypeText) & trailing & "  ' C: " & fi.CText
+                Case "bitfield"
+                    Add m, "    " & fi.Name & " As " & fi.TypeText & "  ' " & fi.Note
+                    Rep "Bitfields", cname & "." & fi.Name & ": " & fi.Note
+                Case "storage"
+                    Add m, "    " & fi.Name & fi.Bounds & " As " & fi.TypeText & "  ' " & fi.Note
+                    Set storage = fi
+                    Rep "Unions", cname & "." & fi.Name & ": " & fi.Note & " (" & fi.TypeText & fi.Bounds & ")"
+                Case "accessor"
+                    accessors.Add fi
+                    storages.Add storage
+            End Select
+        Next
+        If accessors.Count > 0 Then
+            Add m, ""
+            Add m, "    Private Declare PtrSafe Sub RtlMoveMemory Lib ""kernel32"" (ByVal Destination As LongPtr, ByVal Source As LongPtr, ByVal Length As LongPtr)"
+            Dim i As Long
+            For i = 1 To accessors.Count
+                EmitAccessor m, accessors(i), storages(i)
+            Next
+        End If
+        Add m, "End Type"
+        Add m, ""
+        Tally "types"
+        If pack >= 0 And Not r86 Is Nothing Then EmitLayoutCheck tb, r, r86, fields
+    End Sub
+
+    Private Sub EmitAccessor(ByVal m As String, a As FieldInfo, s As FieldInfo)
+        Dim t As String = TbType(a.TypeText)
+        Dim off As Long = a.OffsetBytes - s.OffsetBytes
+        Dim byx As String = If(mMap64.FindRecord(a.TypeText) Is Nothing, "ByVal", "ByRef")
+        Dim src As String = "VarPtr(Me." & s.Name & "(0)) + " & off
+        If Len(a.Bounds) = 0 Then
+            Add m, "    Public Property Get " & a.Name & "() As " & t
+            Add m, "        Dim v As " & t
+            Add m, "        RtlMoveMemory VarPtr(v), " & src & ", LenB(v)"
+            Add m, "        Return v"
+            Add m, "    End Property"
+            Add m, "    Public Property Let " & a.Name & "(" & byx & " v As " & t & ")"
+            Add m, "        RtlMoveMemory " & src & ", VarPtr(v), LenB(v)"
+            Add m, "    End Property"
+        Else
+            Add m, "    Public Property Get " & a.Name & "(ByVal index As Long) As " & t
+            Add m, "        Dim v As " & t
+            Add m, "        RtlMoveMemory VarPtr(v), " & src & " + index * LenB(v), LenB(v)"
+            Add m, "        Return v"
+            Add m, "    End Property"
+            Add m, "    Public Property Let " & a.Name & "(ByVal index As Long, " & byx & " v As " & t & ")"
+            Add m, "        RtlMoveMemory " & src & " + index * LenB(v), VarPtr(v), LenB(v)"
+            Add m, "    End Property"
+        End If
+    End Sub
+
+    Private Sub EmitLayoutCheck(ByVal tb As String, ByVal r As MSXML2.IXMLDOMElement, ByVal r86 As MSXML2.IXMLDOMElement, fields As Collection)
+        Dim f86 As Collection = mMap86.FieldsOf(r86)
+        Dim subName As String = "L_" & tb
+        mLayoutCalls.Add subName
+        mLayout.Add "    Private Sub " & subName & "()"
+        mLayout.Add "        Dim v As " & tb
+        mLayout.Add "        Chk """ & tb & " size"", LenB(v), E(" & mM86.SizeBytes(r86) & ", " & mM64.SizeBytes(r) & ")"
+        Dim i As Long, a As FieldInfo, b As FieldInfo, target As String
+        For i = 1 To fields.Count
+            Set a = fields(i)
+            If a.Kind <> "accessor" And i <= f86.Count Then
+                Set b = f86(i)
+                target = "v." & a.Name
+                If Len(a.Bounds) > 0 Then target &= "(" & Replace(Space$(UBound(Split(a.Bounds, " To ")) - 1), " ", "0, ") & "0)"
+                mLayout.Add "        Chk """ & tb & "." & a.Name & """, CLng(VarPtr(" & target & ") - VarPtr(v)), E(" & b.OffsetBytes & ", " & a.OffsetBytes & ")"
+            End If
+        Next
+        mLayout.Add "    End Sub"
+        mLayout.Add ""
+        EmitTbLayout tb, mM64.NameOf(r), fields
+    End Sub
+
+    ' TbLayout(record, member): tB's own size ("") or offset of a member, by C names, so a harness
+    ' can compare it with what the C compiler reports (PRD req. 42). Bitfields have no offset.
+    Private Sub EmitTbLayout(ByVal tb As String, ByVal cname As String, fields As Collection)
+        Dim fn As String = "T_" & tb
+        mTbLayoutCases.Add "            Case """ & cname & """: Return " & fn & "(member)"
+        mTbLayout.Add "    Private Function " & fn & "(ByVal member As String) As Long"
+        mTbLayout.Add "        Dim v As " & tb
+        mTbLayout.Add "        Select Case member"
+        mTbLayout.Add "            Case """": Return LenB(v)"
+        Dim fi As FieldInfo, storage As FieldInfo, target As String
+        For Each fi In fields
+            Select Case fi.Kind
+                Case "field"
+                    target = "v." & fi.Name
+                    If Len(fi.Bounds) > 0 Then target &= "(" & Replace(Space$(UBound(Split(fi.Bounds, " To ")) - 1), " ", "0, ") & "0)"
+                    mTbLayout.Add "            Case """ & mM64.Attr(fi.Element, "name") & """: Return CLng(VarPtr(" & target & ") - VarPtr(v))"
+                Case "storage"
+                    Set storage = fi
+                Case "accessor"
+                    mTbLayout.Add "            Case """ & mM64.Attr(fi.Element, "name") & """: Return CLng(VarPtr(v." & storage.Name & "(0)) - VarPtr(v)) + " & (fi.OffsetBytes - storage.OffsetBytes)
+            End Select
+        Next
+        mTbLayout.Add "        End Select"
+        mTbLayout.Add "        Return -1"
+        mTbLayout.Add "    End Function"
+        mTbLayout.Add ""
+    End Sub
+
+    Private Function CDeclText(ByVal f As MSXML2.IXMLDOMElement) As String
+        Dim a As MSXML2.IXMLDOMElement, s As String
+        For Each a In f.childNodes
+            If a.nodeName = "Argument" Then s &= If(Len(s) > 0, ", ", "") & mMap64.CTypeText(mM64.Attr(a, "type")) & " " & mM64.Attr(a, "name")
+            If a.nodeName = "Ellipsis" Then s &= If(Len(s) > 0, ", ", "") & "..."
+        Next
+        Return mMap64.CTypeText(mM64.Attr(f, "returns")) & " " & mM64.Attr(f, "name") & "(" & s & ")"
+    End Function
+
+    Private Function AliasClause(ByVal alias As String) As String
+        Return If(Len(alias) > 0, " Alias """ & alias & """", "")
+    End Function
+
+    ' The export name to bind an x86 __stdcall function to (D-026): its plain name when the x86 DLL
+    ' exports that (or when X86Exports is Nothing: not checked), "_name@N" when only that is
+    ' exported. Each case is reported.
+    Private Function StdcallAlias86(ByVal cname As String, ByVal f86 As MSXML2.IXMLDOMElement, ByVal alias As String) As String
+        Dim decorated As String = "_" & cname & "@" & StdcallArgBytes86(f86)
+        If X86Exports Is Nothing Then
+            Rep "stdcall functions", cname & ": stdcall; x86 export name not checked: generate with --x86-dll <x86 DLL> to bind it if it is exported as " & decorated & " (D-026)"
+            Return alias
+        End If
+        If X86Exports.Exists(cname) Then
+            Rep "stdcall functions", cname & ": stdcall; exported undecorated on x86"
+            Return alias
+        End If
+        If X86Exports.Exists(decorated) Then
+            Rep "stdcall functions", cname & ": stdcall; bound on x86 as " & decorated & " (D-026)"
+            Return decorated
+        End If
+        Rep "Declared but not exported", cname & ": stdcall; the x86 DLL exports neither " & cname & " nor " & decorated
+        Return alias
+    End Function
+
+    ' N in _name@N: the bytes of the x86 arguments, each rounded up to 4.
+    Private Function StdcallArgBytes86(ByVal f86 As MSXML2.IXMLDOMElement) As Long
+        Dim a As MSXML2.IXMLDOMElement, el As MSXML2.IXMLDOMElement, total As Long, sz As Long
+        For Each a In f86.childNodes
+            If a.nodeName = "Argument" Then
+                Set el = mM86.Strip(mM86.Attr(a, "type"))
+                Do While Not el Is Nothing
+                    If el.nodeName <> "Typedef" Then Exit Do
+                    Set el = mM86.Strip(mM86.Attr(el, "type"))
+                Loop
+                If el Is Nothing Then
+                    sz = 4
+                ElseIf el.nodeName = "ArrayType" Then
+                    sz = 4
+                Else
+                    sz = mM86.SizeBytes(el)
+                End If
+                total += ((sz + 3) \ 4) * 4
+            End If
+        Next
+        Return total
+    End Function
+
+    Private Sub EmitDeclare(ByVal f As MSXML2.IXMLDOMElement)
+        Dim cname As String = mM64.Attr(f, "name")
+        SetItem "function", cname, f
+        Dim m As String = ModuleFor(mM64.FileOf(f))
+        Dim f86 As MSXML2.IXMLDOMElement = mMap86.FindFunction(cname)
+        Dim cc As String = If(f86 Is Nothing, "CDecl", mMap86.CallConvOf(f86))
+        Dim params As Collection = mMap64.ParamsOf(f)
+        Dim ret As String = TbType(mMap64.ReturnOf(f))
+        Dim variadic As Boolean = mM64.HasEllipsis(f)
+        Dim byValue As Boolean = mMap64.ReturnsStructByValue(f)
+        Dim p As ParamInfo
+        For Each p In params
+            If p.IsStructByValue Then byValue = True
+        Next
+        AddDoc m, f, ""
+        Add m, "' C: " & DocComments.SafeCommentLine(CDeclText(f))
+        If variadic Then
+            Add m, "' NOTE: variadic: a plain variable in the ... part is passed by address; write ByVal x or (x) to pass its value (D-006)."
+            Rep "Variadic functions", cname
+        End If
+        If byValue Then
+            Add m, "' NOTE: passes or returns a struct by value; tB support is verified by the tbfixture harness (task 11)."
+            Rep "Structs passed or returned by value", cname
+        End If
+        Dim alias As String = mNames.FunctionAlias(cname)
+        Dim alias86 As String = alias
+        If Len(cc) = 0 Then alias86 = StdcallAlias86(cname, f86, alias)
+        Dim head As String = "Public DeclareWide PtrSafe " & If(Len(ret) = 0, "Sub", "Function") & " " & mNames.TbName(cname, "function") & _
+            If(Len(cc) > 0, " " & cc, "") & " Lib """ & mDll & """"
+        Dim tail As String = If(Len(ret) > 0, " As " & ret, "")
+        ' D-031: a header function the x86 DLL exports under no name would fail when called
+        If Not X86Exports Is Nothing And alias86 = alias Then
+            If Not X86Exports.Exists(cname) Then
+                Add m, "' NOTE: not exported by " & mDll & " (x86): a call fails at run time"
+                If Len(cc) > 0 Then Rep "Declared but not exported", cname & ": not exported by the x86 DLL; a call fails at run time"
+            End If
+        End If
+        If alias86 <> alias Then
+            Add m, "#If Win64 Then"
+            AddParams m, head & AliasClause(alias), params, Nothing, variadic, tail
+            Add m, "#Else"
+            AddParams m, head & AliasClause(alias86), params, Nothing, variadic, tail
+            Add m, "#End If"
+        Else
+            AddParams m, head & AliasClause(alias), params, Nothing, variadic, tail
+        End If
+        Add m, ""
+        Tally "functions"
+    End Sub
+
+    ' ---- output -----------------------------------------------------------------------------
+
+    ' Module names, sorted.
+    Public Function ModuleNames() As Collection
+        Dim r As New Collection
+        If mBodies Is Nothing Then Return r
+        If mBodies.Count = 0 Then Return r
+        Dim names() As String, i As Long, k As Variant
+        ReDim names(0 To mBodies.Count - 1)
+        For Each k In mBodies.Keys()
+            names(i) = k
+            i += 1
+        Next
+        TextKit.SortOrdinal names, mBodies.Count
+        For i = 0 To mBodies.Count - 1
+            r.Add names(i)
+        Next
+        Return r
+    End Function
+
+    ' The full .twin text of a module (CRLF line endings, final CRLF).
+    Public Function ModuleText(ByVal moduleName As String) As String
+        If mBodies Is Nothing Then Return ""
+        If Not mBodies.Exists(moduleName) Then Return ""
+        Dim lines As New Collection, line As Variant
+        lines.Add "' GENERATED by tbBlob from " & mTitles(moduleName) & " -- do not edit; regenerate instead."
+        For Each line In mScopes(moduleName)
+            lines.Add line
+        Next
+        lines.Add ""
+        lines.Add "Module " & moduleName
+        Dim body As Collection = mBodies(moduleName)
+        Dim last As Long = body.Count
+        Do While last > 0
+            If Len(body(last)) > 0 Then Exit Do
+            last -= 1
+        Loop
+        Dim i As Long
+        For i = 1 To last
+            lines.Add If(Len(body(i)) > 0, "    " & body(i), "")
+        Next
+        lines.Add "End Module"
+        Return JoinLines(lines)
+    End Function
+
+    Private Function JoinLines(lines As Collection) As String
+        Dim parts() As String, i As Long
+        ReDim parts(0 To lines.Count - 1)
+        For i = 1 To lines.Count
+            parts(i - 1) = lines(i)
+        Next
+        Return Join(parts, vbCrLf) & vbCrLf
+    End Function
+
+    ' How many of an item kind were generated ("functions", "types", "enums", "delegates",
+    ' "constants", "macros skipped", ...); 0 for none.
+    Public Function CountOf(ByVal what As String) As Long
+        If mCounts Is Nothing Then Return 0
+        If mCounts.Exists(what) Then
+            Dim counter As ValueBox = mCounts(what)
+            Return counter.Value
+        End If
+        Return 0
+    End Function
+
+    ' The layout-check module: <projectName>_LayoutCheck, with LayoutMismatches() As String.
+    Public Function LayoutModuleName() As String
+        Return mProject & "_LayoutCheck"
+    End Function
+
+    Public Function LayoutModuleText() As String
+        Dim lines As New Collection, line As Variant
+        lines.Add "' GENERATED by tbBlob: expected sizes and offsets from CastXML (x86, x64). Do not edit."
+        lines.Add "' LayoutMismatches() returns """" when every generated Type matches C, else one line per mismatch."
+        lines.Add "Module " & LayoutModuleName()
+        lines.Add "    Private mOut As String"
+        lines.Add ""
+        lines.Add "    Private Function E(ByVal x86 As Long, ByVal x64 As Long) As Long"
+        lines.Add "        #If Win64 Then"
+        lines.Add "            Return x64"
+        lines.Add "        #Else"
+        lines.Add "            Return x86"
+        lines.Add "        #End If"
+        lines.Add "    End Function"
+        lines.Add ""
+        lines.Add "    Private Sub Chk(ByVal what As String, ByVal actual As Long, ByVal expected As Long)"
+        lines.Add "        If actual <> expected Then mOut &= what & "": "" & actual & "" <> "" & expected & vbLf"
+        lines.Add "    End Sub"
+        lines.Add ""
+        If Not mLayout Is Nothing Then
+            For Each line In mLayout
+                lines.Add line
+            Next
+        End If
+        lines.Add "    ' TbLayout(record, """") = tB's LenB of the Type for C record `record`; TbLayout(record, member) ="
+        lines.Add "    ' tB's offset of that C member; -1 when unknown (no such record/member, bitfield, over-aligned)."
+        lines.Add "    Public Function TbLayout(ByVal record As String, ByVal member As String) As Long"
+        lines.Add "        Select Case record"
+        If Not mTbLayoutCases Is Nothing Then
+            For Each line In mTbLayoutCases
+                lines.Add line
+            Next
+        End If
+        lines.Add "        End Select"
+        lines.Add "        Return -1"
+        lines.Add "    End Function"
+        lines.Add ""
+        If Not mTbLayout Is Nothing Then
+            For Each line In mTbLayout
+                lines.Add line
+            Next
+        End If
+        lines.Add "    Public Function LayoutMismatches() As String"
+        lines.Add "        mOut = """""
+        If Not mLayoutCalls Is Nothing Then
+            For Each line In mLayoutCalls
+                lines.Add "        " & line
+            Next
+        End If
+        lines.Add "        Return mOut"
+        lines.Add "    End Function"
+        lines.Add "End Module"
+        Return JoinLines(lines)
+    End Function
+
+    ' The optional loader module (D-027): <projectName>_Loader with Load(folder), LoadFile(path)
+    ' and IsLoaded(). Nothing calls it; the consumer decides.
+    Public Function LoaderModuleName() As String
+        Return mProject & "_Loader"
+    End Function
+
+    Public Function LoaderModuleText() As String
+        Dim lines As New Collection
+        lines.Add "' GENERATED by tbBlob: optional loader for " & mDll & " (D-027). Do not edit."
+        lines.Add "' Calling it is optional. Without it, the declares bind to " & mDll & " on the first call through"
+        lines.Add "' the Windows DLL search order: the process's EXE folder, the system folders, the current"
+        lines.Add "' folder, then PATH -- never subfolders. Call Load or LoadFile before the first call to use a"
+        lines.Add "' DLL from elsewhere; every Lib """ & mDll & """ declare then binds to the module already loaded."
+        lines.Add "Module " & LoaderModuleName()
+        lines.Add "    Private Declare PtrSafe Function LoadLibraryExW Lib ""kernel32"" (ByVal lpLibFileName As LongPtr, ByVal hFile As LongPtr, ByVal dwFlags As Long) As LongPtr"
+        lines.Add "    Private Declare PtrSafe Function GetModuleHandleW Lib ""kernel32"" (ByVal lpModuleName As LongPtr) As LongPtr"
+        lines.Add "    Private Declare PtrSafe Function GetFileAttributesW Lib ""kernel32"" (ByVal lpFileName As LongPtr) As Long"
+        lines.Add "    ' The DLL's own dependencies are looked for in its folder first."
+        lines.Add "    Private Const LOAD_WITH_ALTERED_SEARCH_PATH As Long = 8"
+        lines.Add "    Private Const LOAD_FAILED As Long = vbObjectError + &H2701"
+        lines.Add "    Private Const DLL_NAME As String = """ & mDll & """"
+        lines.Add "    #If Win64 Then"
+        lines.Add "        Private Const ARCH_DIR As String = ""win64"""
+        lines.Add "    #Else"
+        lines.Add "        Private Const ARCH_DIR As String = ""win32"""
+        lines.Add "    #End If"
+        lines.Add ""
+        lines.Add "    ' Loads folder\win32\" & mDll & " or folder\win64\" & mDll & " (matching the running code) when"
+        lines.Add "    ' that file exists, else folder\" & mDll & ". Returns the module handle. Raises an error naming"
+        lines.Add "    ' every path tried when it cannot load; an architecture file that exists but fails to load is"
+        lines.Add "    ' not passed over for folder\" & mDll & " (that could be the other architecture's DLL)."
+        lines.Add "    Public Function Load(ByVal folder As String) As LongPtr"
+        lines.Add "        Do While Len(folder) > 0 And (Right$(folder, 1) = ""\"" Or Right$(folder, 1) = ""/"")"
+        lines.Add "            folder = Left$(folder, Len(folder) - 1)"
+        lines.Add "        Loop"
+        lines.Add "        Dim archPath As String = folder & ""\"" & ARCH_DIR & ""\"" & DLL_NAME"
+        lines.Add "        Dim flatPath As String = folder & ""\"" & DLL_NAME"
+        lines.Add "        Dim h As LongPtr, tried As String"
+        lines.Add "        If GetFileAttributesW(StrPtr(archPath)) <> -1 Then"
+        lines.Add "            h = LoadLibraryExW(StrPtr(archPath), 0, LOAD_WITH_ALTERED_SEARCH_PATH)"
+        lines.Add "            If h <> 0 Then Return h"
+        lines.Add "            tried = archPath & "" (Windows error "" & Err.LastDllError & "")"""
+        lines.Add "        Else"
+        lines.Add "            tried = archPath & "" (not found); """
+        lines.Add "            If GetFileAttributesW(StrPtr(flatPath)) <> -1 Then"
+        lines.Add "                h = LoadLibraryExW(StrPtr(flatPath), 0, LOAD_WITH_ALTERED_SEARCH_PATH)"
+        lines.Add "                If h <> 0 Then Return h"
+        lines.Add "                tried &= flatPath & "" (Windows error "" & Err.LastDllError & "")"""
+        lines.Add "            Else"
+        lines.Add "                tried &= flatPath & "" (not found)"""
+        lines.Add "            End If"
+        lines.Add "        End If"
+        lines.Add "        Err.Raise LOAD_FAILED, , ""cannot load "" & DLL_NAME & "": tried "" & tried"
+        lines.Add "    End Function"
+        lines.Add ""
+        lines.Add "    ' Loads " & mDll & " from one full path. Returns the module handle; raises an error naming"
+        lines.Add "    ' the path when it cannot load."
+        lines.Add "    Public Function LoadFile(ByVal path As String) As LongPtr"
+        lines.Add "        Dim h As LongPtr = LoadLibraryExW(StrPtr(path), 0, LOAD_WITH_ALTERED_SEARCH_PATH)"
+        lines.Add "        If h = 0 Then Err.Raise LOAD_FAILED, , ""cannot load "" & DLL_NAME & "": tried "" & path & "" (Windows error "" & Err.LastDllError & "")"""
+        lines.Add "        Return h"
+        lines.Add "    End Function"
+        lines.Add ""
+        lines.Add "    ' True when a module named " & mDll & " is loaded in this process."
+        lines.Add "    Public Function IsLoaded() As Boolean"
+        lines.Add "        Return GetModuleHandleW(StrPtr(DLL_NAME)) <> 0"
+        lines.Add "    End Function"
+        lines.Add "End Module"
+        Return JoinLines(lines)
+    End Function
+
+    ' The generation report (Markdown).
+    Public Function ReportText() As String
+        Dim lines As New Collection, s As Variant, line As Variant
+        lines.Add "# tbBlob generation report: " & mProject
+        lines.Add ""
+        lines.Add "## Counts"
+        If Not mCounts Is Nothing Then
+            lines.Add "- modules: " & mBodies.Count
+            For Each s In Array("functions", "types", "enums", "enum values", "delegates", "synthesized delegates", "opaque aliases", "type aliases", "constants", "macros skipped")
+                lines.Add "- " & s & ": " & CountOf(s)
+            Next
+        End If
+        lines.Add ""
+        lines.Add "## Loading the DLL"
+        lines.Add "- The declares bind to " & mDll & " by name on the first call, through the Windows DLL search order: the folder of the process's EXE, the system folders, the current folder, then PATH. Subfolders are never searched; for a tB DLL or add-in, the EXE folder is the host's."
+        lines.Add "- To load it from elsewhere, call " & LoaderModuleName() & ".Load(folder) before the first call: it loads folder\win32\" & mDll & " or folder\win64\" & mDll & _
+            " (matching the running code) when that file exists, else folder\" & mDll & ", with the DLL's own dependencies from its folder. " & _
+            LoaderModuleName() & ".LoadFile(path) loads one full path."
+        lines.Add ""
+        If Not mReport Is Nothing Then
+            For Each s In mSections
+                lines.Add "## " & s
+                If mReport(s).Count = 0 Then
+                    lines.Add "- none"
+                Else
+                    For Each line In mReport(s)
+                        lines.Add line
+                    Next
+                End If
+                lines.Add ""
+            Next
+        End If
+        Return JoinLines(lines)
+    End Function
+End Class

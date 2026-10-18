@@ -1,0 +1,12 @@
+INFO 0.arch | win64
+PASS 0.libgit2_init (first init returns 1) | actual=1 expected=1
+PASS 1.layout every generated Type matches CastXML
+PASS 2.open of a missing repo returns GIT_ENOTFOUND | actual=-3 expected=-3
+PASS 3.opts round trip | actual=12345678 expected=12345678
+PASS 4.commit_create with a parents array | rc=0
+PASS 4.revwalk ends with GIT_ITEROVER | actual=-31 expected=-31
+FAIL 6.clone over file:// | rc=-1 klass=2 message=failed
+PASS 6.checkout progress callback called | calls=3
+PASS 6.transfer progress callback called | calls=2
+PASS 0.libgit2_shutdown balances init (0 left) | actual=0 expected=0
+INFO 0.summary | passed=10 failed=1

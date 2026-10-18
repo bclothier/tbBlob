@@ -1,0 +1,11 @@
+' SPIKE throwaway: entry point. Results go to spikes\castxml-ffi-generator\results\results-<arch>.txt
+Module MainModule
+    Public Sub Main()
+        Results.Start
+        Dim p As LongPtr
+        Results.Info "0.arch", Results.Arch() & " LenB(LongPtr)=" & LenB(p)
+        Layout.RunAll
+        Tests.RunAll
+        Results.Info "0.summary", "passed=" & Results.Passed & " failed=" & Results.Failed
+    End Sub
+End Module

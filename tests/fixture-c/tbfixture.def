@@ -1,0 +1,4 @@
+; Exports that tbfixture.h marks TBF_DEF_API: undecorated on x86, as the Windows API does (D-026).
+LIBRARY tbfixture
+EXPORTS
+    tbf_std_sub

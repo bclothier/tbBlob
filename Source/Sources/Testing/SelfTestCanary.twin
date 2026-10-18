@@ -1,0 +1,12 @@
+' Used by SelfTest's runner self-check: test 1 must run, and test 2's error must reach the
+' runner with its number and message intact.
+Module SelfTestCanary
+    Public Const MODULE_ID As Long = 0
+
+    Public Sub RunTest(ByVal index As Long)
+        Select Case index
+            Case 1: SelfTest.CanaryHit
+            Case 2: Err.Raise SelfTest.CHECK_FAILED, , "canary"
+        End Select
+    End Sub
+End Module

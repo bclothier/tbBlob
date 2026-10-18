@@ -1,0 +1,328 @@
+' Doc comments and other text recovered from the header source (PRD req. 27): CastXML records
+' where a comment is (file + byte offsets) and where a declaration is (file + line) but not the
+' text. Also recovers function-type parameter names, which CastXML drops (D-019, task 8.1).
+Module DocComments
+    ' Why the last call returned less than asked (e.g. a header that cannot be read); "" if fine.
+    Public LastProblem As String
+
+    Private mBytes As Collection    ' path -> Byte() (file contents); keyed, case-sensitive (D-040)
+    Private mLines As Collection    ' path -> String() (lines, 1-based via index - 1)
+
+    ' ---- file cache --------------------------------------------------------------------
+
+    Private Function ReadBytes(ByVal path As String, b() As Byte, ByRef n As Long) As Boolean
+        If mBytes Is Nothing Then
+            Set mBytes = New Collection
+            mBytes.KeyCompareMode = vbBinaryCompare
+        End If
+        If Not mBytes.Exists(path) Then
+            If FileSys.KindOf(path) <> FileSys.KIND_FILE Then
+                LastProblem = "cannot read " & path
+                Return False
+            End If
+            Dim data() As Byte
+            FileSys.ReadAllBytes path, data
+            mBytes.Add data, path
+        End If
+        b = mBytes(path)
+        n = UBound(b) - LBound(b) + 1
+        Return True
+    End Function
+
+    Private Function SourceLines(ByVal path As String, lines() As String) As Boolean
+        If mLines Is Nothing Then
+            Set mLines = New Collection
+            mLines.KeyCompareMode = vbBinaryCompare
+        End If
+        If Not mLines.Exists(path) Then
+            Dim b() As Byte, n As Long
+            If Not ReadBytes(path, b, n) Then Return False
+            mLines.Add Split(Replace(TextKit.Utf8Decode(b, 0, n), vbCr, ""), vbLf), path
+        End If
+        lines = mLines(path)
+        Return True
+    End Function
+
+    ' ---- doc comments ------------------------------------------------------------------
+
+    ' The element's doc comment exactly as written in the header (markers included), with line
+    ' endings normalized to CRLF; "" when it has none. tB accepts /* ... */ comments, so the
+    ' emitter writes this verbatim -- nothing reformatted, nothing lost.
+    Public Function DocRaw(m As CxModel, ByVal el As MSXML2.IXMLDOMElement) As String
+        LastProblem = ""
+        Dim c As MSXML2.IXMLDOMElement = m.CommentOf(el)
+        If c Is Nothing Then Return ""
+        Dim path As String = m.FileOf(c)
+        Dim b() As Byte, n As Long
+        If Not ReadBytes(path, b, n) Then Return ""
+        Dim startAt As Long = CLng(Val(m.Attr(c, "begin_offset")))
+        Dim stopAt As Long = CLng(Val(m.Attr(c, "end_offset")))
+        If startAt < 0 Or stopAt > n Or stopAt <= startAt Then
+            LastProblem = "comment offsets " & startAt & "-" & stopAt & " are outside " & path & " (" & n & " bytes)"
+            Return ""
+        End If
+        Dim s As String = TextKit.Utf8Decode(b, startAt, stopAt - startAt)
+        Return Replace(Replace(s, vbCrLf, vbLf), vbLf, vbCrLf)
+    End Function
+
+    ' The element's doc comment as plain lines (comment markers removed, outer blank lines
+    ' trimmed); empty when it has none. For the report and one-line uses.
+    Public Function DocFor(m As CxModel, ByVal el As MSXML2.IXMLDOMElement) As Collection
+        Dim r As New Collection
+        Dim raw As String = DocRaw(m, el)
+        If Len(raw) = 0 Then Return r
+        Dim parts() As String = Split(raw, vbCrLf)
+        Dim i As Long, s As String
+        For i = 0 To UBound(parts)
+            s = Trim$(Replace(parts(i), vbTab, " "))
+            If i = 0 Then s = StripOpening(s)
+            If i = UBound(parts) Then
+                If Right$(s, 2) = "*/" Then s = RTrim$(Left$(s, Len(s) - 2))
+            End If
+            If i > 0 And Left$(s, 1) = "*" And Left$(s, 2) <> "*/" Then s = LTrim$(Mid$(s, 2))
+            parts(i) = s
+        Next
+        Dim first As Long = 0
+        Dim last As Long = UBound(parts)
+        Do While first <= last
+            If Len(parts(first)) > 0 Then Exit Do
+            first += 1
+        Loop
+        Do While last >= first
+            If Len(parts(last)) > 0 Then Exit Do
+            last -= 1
+        Loop
+        For i = first To last
+            r.Add parts(i)
+        Next
+        Return r
+    End Function
+
+    Private Function StripOpening(ByVal s As String) As String
+        Dim marker As Variant
+        For Each marker In Array("/**<", "/*!<", "///<", "//!<", "/**", "/*!", "///", "//!", "/*", "//")
+            If Left$(s, Len(marker)) = marker Then Return LTrim$(Mid$(s, Len(marker) + 1))
+        Next
+        Return s
+    End Function
+
+    ' A line safe to put after "' " in tB: trailing spaces removed, and "." appended when it ends
+    ' in "_" (a trailing " _" would continue the comment onto the next tB line).
+    Public Function SafeCommentLine(ByVal text As String) As String
+        Dim t As String = RTrim$(text)
+        If Right$(t, 1) = "_" Then t &= "."
+        Return t
+    End Function
+
+    ' The trailing comment on an enum value's source line (/**< ... */, /* ... */ or // ...);
+    ' "" when none. CastXML gives enum values no comments of their own.
+    Public Function EnumValueComment(m As CxModel, ByVal enumEl As MSXML2.IXMLDOMElement, ByVal valueName As String) As String
+        LastProblem = ""
+        Dim lines() As String
+        If Not SourceLines(m.FileOf(enumEl), lines) Then Return ""
+        Dim i As Long, s As String, n As Long
+        For i = CLng(Val(m.Attr(enumEl, "line"))) - 1 To UBound(lines)
+            s = LTrim$(Replace(lines(i), vbTab, " "))
+            If Left$(s, Len(valueName)) = valueName Then
+                n = Len(valueName)
+                If Not (Mid$(s, n + 1, 1) Like "[A-Za-z0-9_]") Then Return TrailingComment(Mid$(s, n + 1))
+            End If
+            If InStr(s, "}") > 0 Then Exit For
+        Next
+        Return ""
+    End Function
+
+    Private Function TrailingComment(ByVal s As String) As String
+        Dim p As Long = InStr(s, "/*")
+        Dim q As Long = InStr(s, "//")
+        If p = 0 And q = 0 Then Return ""
+        If p = 0 Or (q > 0 And q < p) Then Return Trim$(StripOpening(Mid$(s, q)))
+        Dim c As String = Mid$(s, p)
+        Dim e As Long = InStr(3, c, "*/")
+        If e > 0 Then c = Left$(c, e - 1)
+        Return Trim$(StripOpening(c))
+    End Function
+
+    ' ---- parameter names ------------------------------------------------------------------
+
+    ' Removes /* ... */ and // ... comments from C text.
+    Private Function StripComments(ByVal s As String) As String
+        Dim r As String, e As Long
+        Dim i As Long = 1
+        Do While i <= Len(s)
+            If Mid$(s, i, 2) = "/*" Then
+                e = InStr(i + 2, s, "*/")
+                If e = 0 Then Exit Do
+                r &= " "
+                i = e + 2
+            ElseIf Mid$(s, i, 2) = "//" Then
+                e = InStr(i, s, vbLf)
+                If e = 0 Then Exit Do
+                i = e
+            Else
+                r &= Mid$(s, i, 1)
+                i += 1
+            End If
+        Loop
+        Return r
+    End Function
+
+    Private Function IsCKeyword(ByVal w As String) As Boolean
+        Select Case w
+            Case "void", "char", "short", "int", "long", "float", "double", "signed", "unsigned", _
+                 "const", "volatile", "struct", "union", "enum", "_Bool", "restrict", "__restrict", _
+                 "register", "__stdcall", "__cdecl", "__fastcall", "__thiscall", "__int64"
+                Return True
+        End Select
+        Return False
+    End Function
+
+    ' The parameter's name, "" when it has none; raises nothing -- sets bad when it cannot tell.
+    Private Function NameOfParam(ByVal p As String, ByRef bad As Boolean) As String
+        p = Trim$(p)
+        Dim br As Long = InStr(p, "[")
+        If br > 0 Then p = RTrim$(Left$(p, br - 1))
+        If InStr(p, "(") > 0 Then
+            ' a function-pointer parameter "ret (*name)(...)" names itself inside the first parens
+            Dim a As Long = InStr(p, "(")
+            Dim inner As String = Trim$(Mid$(p, a + 1))
+            If Left$(inner, 1) = "*" Then
+                inner = LTrim$(Mid$(inner, 2))
+                Dim n As Long = 0
+                Do While n < Len(inner)
+                    If Not (Mid$(inner, n + 1, 1) Like "[A-Za-z0-9_]") Then Exit Do
+                    n += 1
+                Loop
+                If n > 0 And LTrim$(Mid$(inner, n + 1, 1)) = ")" Then Return Left$(inner, n)
+                If n = 0 Then Return ""
+            End If
+            bad = True
+            Return ""
+        End If
+        ' identifiers in order
+        Dim words As New Collection
+        Dim j As Long
+        Dim i As Long = 1
+        Do While i <= Len(p)
+            If Mid$(p, i, 1) Like "[A-Za-z_]" Then
+                j = i
+                Do While j <= Len(p)
+                    If Not (Mid$(p, j, 1) Like "[A-Za-z0-9_]") Then Exit Do
+                    j += 1
+                Loop
+                words.Add Mid$(p, i, j - i)
+                i = j
+            Else
+                i += 1
+            End If
+        Loop
+        If words.Count < 2 Then Return ""
+        Dim lastWord As String = words(words.Count)
+        If IsCKeyword(lastWord) Then Return ""
+        Return lastWord
+    End Function
+
+    ' The C parameter names of the function type declared by el (a Typedef or a Field), read from
+    ' its declaration in the header. A parameter the header leaves unnamed becomes argN and is
+    ' not a loss. When the declaration cannot be parsed (e.g. a macro in the parameter list),
+    ' every name is argN and lostReason says why -- the only case the report treats as a loss.
+    Public Function ParamNamesFor(m As CxModel, ByVal el As MSXML2.IXMLDOMElement, ByVal paramCount As Long, ByRef lostReason As String) As Collection
+        LastProblem = ""
+        lostReason = ""
+        Dim names As New Collection, i As Long
+        Dim found() As String
+        Dim reason As String = ParseParamNames(m, el, paramCount, found)
+        If Len(reason) > 0 Then
+            lostReason = reason
+            For i = 1 To paramCount
+                names.Add "arg" & i
+            Next
+            Return names
+        End If
+        For i = 1 To paramCount
+            names.Add If(Len(found(i - 1)) > 0, found(i - 1), "arg" & i)
+        Next
+        Return names
+    End Function
+
+    ' "" and found() filled, or why the declaration could not be parsed.
+    Private Function ParseParamNames(m As CxModel, ByVal el As MSXML2.IXMLDOMElement, ByVal paramCount As Long, found() As String) As String
+        Dim lines() As String
+        Dim path As String = m.FileOf(el)
+        If Not SourceLines(path, lines) Then Return "could not read " & path
+        Dim lineNo As Long = CLng(Val(m.Attr(el, "line")))
+        If lineNo < 1 Or lineNo - 1 > UBound(lines) Then Return "could not find line " & lineNo & " of " & path
+
+        ' the declaration: from its line up to the first ";" outside parentheses
+        Dim text As String, i As Long, k As Long, depth As Long, decl As String, done As Boolean
+        For i = lineNo - 1 To UBound(lines)
+            text &= lines(i) & vbLf
+            Dim clean As String = StripComments(text)
+            depth = 0
+            For k = 1 To Len(clean)
+                Select Case Mid$(clean, k, 1)
+                    Case "(": depth += 1
+                    Case ")": depth -= 1
+                    Case ";"
+                        If depth = 0 Then
+                            decl = Left$(clean, k - 1)
+                            done = True
+                            Exit For
+                        End If
+                End Select
+            Next
+            If done Then Exit For
+            If i - (lineNo - 1) > 60 Then Exit For
+        Next
+        If Not done Then Return "could not find the end of the declaration at " & path & ":" & lineNo
+
+        ' the parameter list: the last parenthesised group at depth 0
+        Dim groupStart As Long, groupEnd As Long, openAt As Long
+        depth = 0
+        For k = 1 To Len(decl)
+            Select Case Mid$(decl, k, 1)
+                Case "("
+                    If depth = 0 Then openAt = k
+                    depth += 1
+                Case ")"
+                    depth -= 1
+                    If depth = 0 Then
+                        groupStart = openAt
+                        groupEnd = k
+                    End If
+            End Select
+        Next
+        If groupEnd = 0 Then Return "could not find the parameter list at " & path & ":" & lineNo
+        Dim inner As String = Trim$(Replace(Mid$(decl, groupStart + 1, groupEnd - groupStart - 1), vbLf, " "))
+
+        ' split at commas outside parentheses
+        Dim params As New Collection
+        Dim startAt As Long = 1
+        depth = 0
+        If Len(inner) > 0 And inner <> "void" Then
+            For k = 1 To Len(inner)
+                Select Case Mid$(inner, k, 1)
+                    Case "(": depth += 1
+                    Case ")": depth -= 1
+                    Case ","
+                        If depth = 0 Then
+                            params.Add Mid$(inner, startAt, k - startAt)
+                            startAt = k + 1
+                        End If
+                End Select
+            Next
+            params.Add Mid$(inner, startAt)
+        End If
+        If params.Count <> paramCount Then
+            Return "could not parse the parameters at " & path & ":" & lineNo & " (found " & params.Count & ", expected " & paramCount & ")"
+        End If
+        If paramCount = 0 Then Return ""
+        ReDim found(0 To paramCount - 1)
+        Dim bad As Boolean
+        For k = 1 To paramCount
+            found(k - 1) = NameOfParam(params(k), bad)
+            If bad Then Return "could not parse parameter '" & Trim$(params(k)) & "' at " & path & ":" & lineNo & " (a macro or an unusual declarator)"
+        Next
+        Return ""
+    End Function
+End Module

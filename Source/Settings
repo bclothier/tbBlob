@@ -1,0 +1,71 @@
+{
+	"configuration.inherits": "Defaults",
+	"project.appTitle": "tbBlob",
+	"project.buildPath": "${SourcePath}\\Build\\${ProjectName}_${Architecture}.${FileExtension}",
+	"project.buildType": "Standard EXE",
+	"project.comInitialization": "MTA (CoInitializeEx - Multi Threaded Apartment)",
+	"project.depAware": true,
+	"project.description": "twinBasic C/C++ FFI Generator",
+	"project.exportPath": "${SourcePath}\\Source",
+	"project.exportPathIsV2": true,
+	"project.featureFlagsUI": 0,
+	"project.featureFlagsUI2": 4294950912,
+	"project.id": "{EAEAEAEA-EAEA-EAEA-EAEA-EAEAEAEAEA00}",
+	"project.isConsoleApplication": true,
+	"project.largeAddressAware": true,
+	"project.name": "tbBlob",
+	"project.optionExplicit": true,
+	"project.references": [
+		{
+			"hasBeenSplit": true,
+			"id": "{F50B82D0-DCAB-43FE-9631-11959D4A4728}",
+			"isCompilerPackage": true,
+			"licence": "MIT",
+			"name": "[COMPILER PACKAGE] twinBASIC - VB Compatibility Package (Forms)",
+			"path32": "/Packages/WindowsControlsPackage",
+			"path64": "/Packages/WindowsControlsPackage",
+			"publishedDate": "09-FEB-2022",
+			"publishedTime": "15:48:54",
+			"publisher": "TWINBASIC-COMPILER",
+			"symbolId": "VB",
+			"versionBuild": 0,
+			"versionMajor": 0,
+			"versionMinor": 0,
+			"versionRevision": 31
+		},
+		{
+			"id": "{00020430-0000-0000-C000-000000000046}",
+			"lcid": 0,
+			"name": "OLE Automation",
+			"path32": "C:\\Windows\\SysWow64\\stdole2.tlb",
+			"path64": "C:\\Windows\\System32\\stdole2.tlb",
+			"symbolId": "stdole",
+			"versionMajor": 2,
+			"versionMinor": 0
+		},
+		{
+			"autoCtlExt": true,
+			"id": "{F5078F18-C551-11D3-89B9-0000F81FE221}",
+			"lcid": 0,
+			"name": "Microsoft XML, v6.0",
+			"path32": "C:\\Windows\\SysWOW64\\msxml6.dll",
+			"path64": "C:\\Windows\\System32\\msxml6.dll",
+			"symbolId": "MSXML2",
+			"versionMajor": 6,
+			"versionMinor": 0
+		}
+	],
+	"project.settingsVersion": 1,
+	"project.startupObject": "Sub Main",
+	"project.terminalServerAware": true,
+	"project.useProjectIdForTypeLibraryId": true,
+	"project.versionAutoIncrement": "Revision",
+	"project.warnings": {
+		"errors": [],
+		"hints": [],
+		"ignored": [],
+		"info": [],
+		"warnings": []
+	},
+	"runtime.useUnicodeStandardLibrary": true
+}

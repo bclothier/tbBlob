@@ -1,0 +1,46 @@
+#ifndef LIB_H
+#define LIB_H
+
+#define LIB_DEC 42
+#define LIB_HEX 0x7F
+#define LIB_OCT 017
+#define LIB_U 42u
+#define LIB_LL 1234567890123LL
+#define LIB_TOP 0x80000000u
+#define LIB_ALL 0xFFFFFFFFu
+#define LIB_SHIFT (1u << 31)
+#define LIB_EXPR (LIB_DEC * 2 + 1)
+#define LIB_NEG (-5)
+#define LIB_NOT (~0u)
+#define LIB_REF LIB_HEX
+#define LIB_CHAR ';'
+#define LIB_CHAR_ESC '\n'
+#define LIB_STR "tb\"fixture\""
+#define LIB_STR_CTRL "a\tb"
+#define LIB_DBL 2.5
+#define LIB_INIT { 1, 2 }
+#define LIB_FN(x) ((x) * 2)
+#define LIB_CYC_A LIB_CYC_B
+#define LIB_CYC_B LIB_CYC_A
+#define LIB_USES_SYS (_MSC_VER + 0)
+#define LIB_UNKNOWN (NOT_DEFINED + 1)
+#  define LIB_CAST ((int)0x80000000u)
+#define LIB_MIXED (LIB_LL + 1)
+#define LIB_PREC (2 + 3 * \
+                  4 - (8 >> 1) | 1)
+#if 0
+#define LIB_INACTIVE 5
+#endif
+
+/* MSVC sized integer suffixes (libgit2's stdint.h uses them) */
+#define LIB_I64 9223372036854775807i64
+#define LIB_I64_MIN (-9223372036854775807i64 - 1)
+#define LIB_UI32 0xffffffffui32
+#define LIB_I8 127i8
+#define LIB_UI64 0xffffffffffffffffui64
+/* a macro that names a type, not a constant */
+#define LIB_TYPE_ALIAS lib_handle_t
+
+int lib_func(void);
+
+#endif

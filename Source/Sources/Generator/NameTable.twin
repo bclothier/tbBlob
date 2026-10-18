@@ -1,0 +1,150 @@
+' Gives every generated name its tB spelling (PRD req. 26, D-011). tB is case-insensitive and
+' enum values are global, so C names equal ignoring case collide. Two phases: Add every C name
+' with its kind, then Resolve. Within a collision group the keeper is chosen by kind rank
+' (type/delegate, then const, then function, then enum value) and then ordinal C name; the others
+' get "_" appended (repeated until unique). A renamed function keeps its export name with
+' Alias "<C name>". Resolution is independent of the order names were added.
+Class NameTable
+    ' Keyed tB Collections, case-sensitive keys (D-040): collisions are found through the
+    ' explicitly lower-cased keys of mTaken / the groups, not through the collection's comparison.
+    Private mEntries As Collection      ' "kind|cName" -> True (insertion order irrelevant)
+    Private mResolved As Collection     ' "kind|cName" -> tB name
+    Private mTaken As Collection        ' LCase(name) -> True
+    Private mAliases As Collection      ' function cName -> cName, for renamed functions
+    Private mLog As New Collection
+
+    Private Sub Class_Initialize()
+        Set mEntries = New Collection
+        mEntries.KeyCompareMode = vbBinaryCompare
+        ResetResults
+    End Sub
+
+    Private Sub ResetResults()
+        Set mResolved = New Collection
+        mResolved.KeyCompareMode = vbBinaryCompare
+        Set mTaken = New Collection
+        mTaken.KeyCompareMode = vbBinaryCompare
+        Set mAliases = New Collection
+        mAliases.KeyCompareMode = vbBinaryCompare
+    End Sub
+
+    ' Kinds: "type", "delegate", "const", "function", "enumvalue".
+    Public Sub Add(ByVal cName As String, ByVal kind As String)
+        Dim key As String = kind & "|" & cName
+        If Not mEntries.Exists(key) Then mEntries.Add True, key
+    End Sub
+
+    Private Function Rank(ByVal kind As String) As Long
+        Select Case kind
+            Case "type", "delegate": Return 0
+            Case "const": Return 1
+            Case "function": Return 2
+            Case "enumvalue": Return 3
+        End Select
+        Return 4
+    End Function
+
+    ' Sort key within a collision group: rank, then ordinal C name, then kind.
+    Private Function SortKey(ByVal entry As String) As String
+        Dim kind As String = Split(entry, "|")(0)
+        Dim cName As String = Mid$(entry, Len(kind) + 2)
+        Return Rank(kind) & "|" & cName & "|" & kind
+    End Function
+
+    Public Sub Resolve()
+        Dim groups As New Collection        ' LCase(cName) -> Collection of "kind|cName"
+        groups.KeyCompareMode = vbBinaryCompare
+        Dim key As Variant, cName As String, lower As String
+        ResetResults
+        Set mLog = New Collection
+        For Each key In mEntries.Keys()
+            cName = Mid$(key, InStr(key, "|") + 1)
+            lower = LCase$(cName)
+            If Not groups.Exists(lower) Then groups.Add New Collection, lower
+            groups(lower).Add CStr(key)
+            If Not mTaken.Exists(lower) Then mTaken.Add True, lower
+        Next
+
+        Dim groupKeys() As String, n As Long, i As Long
+        n = groups.Count
+        If n = 0 Then Exit Sub
+        ReDim groupKeys(0 To n - 1)
+        i = 0
+        For Each key In groups.Keys()
+            groupKeys(i) = key
+            i += 1
+        Next
+        TextKit.SortOrdinal groupKeys, n
+
+        Dim g As Long
+        For g = 0 To n - 1
+            Dim members As Collection = groups(groupKeys(g))
+            Dim sorted() As String, sortKeys() As String, m As Long, j As Long
+            ReDim sorted(0 To members.Count - 1)
+            ReDim sortKeys(0 To members.Count - 1)
+            For m = 1 To members.Count
+                sorted(m - 1) = members(m)
+                sortKeys(m - 1) = SortKey(members(m))
+            Next
+            ' insertion sort by sortKeys (groups are tiny)
+            For m = 1 To members.Count - 1
+                Dim v As String = sorted(m)
+                Dim vk As String = sortKeys(m)
+                j = m - 1
+                Do While j >= 0
+                    If TextKit.CompareOrdinal(sortKeys(j), vk) <= 0 Then Exit Do
+                    sorted(j + 1) = sorted(j)
+                    sortKeys(j + 1) = sortKeys(j)
+                    j -= 1
+                Loop
+                sorted(j + 1) = v
+                sortKeys(j + 1) = vk
+            Next
+            Dim keeper As String = sorted(0)
+            mResolved.Add Mid$(keeper, InStr(keeper, "|") + 1), keeper
+            For m = 1 To members.Count - 1
+                Dim entry As String = sorted(m)
+                Dim kind As String = Split(entry, "|")(0)
+                Dim original As String = Mid$(entry, Len(kind) + 2)
+                Dim candidate As String = original & "_"
+                Do While mTaken.Exists(LCase$(candidate))
+                    candidate &= "_"
+                Loop
+                mTaken.Add True, LCase$(candidate)
+                mResolved.Add candidate, entry
+                If kind = "function" Then mAliases.Add original, original
+                mLog.Add kind & " " & original & " -> " & candidate & " (collides with " & Split(keeper, "|")(0) & " " & Mid$(keeper, InStr(keeper, "|") + 1) & ")"
+            Next
+        Next
+    End Sub
+
+    ' The tB name for a C name of that kind ("" if it was never added).
+    Public Function TbName(ByVal cName As String, ByVal kind As String) As String
+        Dim key As String = kind & "|" & cName
+        If mResolved.Exists(key) Then Return mResolved(key)
+        Return ""
+    End Function
+
+    ' The C name to put in Alias "..." for a renamed function; "" when not renamed.
+    Public Function FunctionAlias(ByVal cName As String) As String
+        If mAliases.Exists(cName) Then Return mAliases(cName)
+        Return ""
+    End Function
+
+    ' One line per rename: "<kind> <C name> -> <tB name> (collides with <kind> <C name>)".
+    Public Function RenameLog() As Collection
+        Return mLog
+    End Function
+
+    ' True when a name must be written as [name] in tB. Empty list for now: D-007 found no
+    ' C name that tB rejects unescaped; kept as the hook for one.
+    Public Function NeedsEscape(ByVal name As String) As Boolean
+        Return False
+    End Function
+
+    ' True when the name (any case) is already a resolved tB name or a reserved word.
+    Public Function IsTaken(ByVal name As String) As Boolean
+        If mTaken.Exists(LCase$(name)) Then Return True
+        Return Naming.IsReservedWord(name)
+    End Function
+End Class

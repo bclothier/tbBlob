@@ -1,0 +1,210 @@
+' The built-in tests (--self-test). Each Tests_* module numbers its tests in Register and runs
+' one in RunTest(index); Dispatch calls RunTest directly, so a test's error reaches RunOne's
+' handler with its number and message intact. (Delegates lost errors raised in the test, and
+' CallByName turned them into a generic "Exception occurred" -- D-015.) A failed assertion raises
+' CHECK_FAILED, which ends that test and is reported as FAIL with its message.
+' Pattern after tools\impexp\impexp.twinproj's SelfTest.twin.
+Module SelfTest
+    Public Const CHECK_FAILED As Long = vbObjectError + &H1200
+
+    Private mNames() As String
+    Private mModules() As Long
+    Private mIndexes() As Long
+    Private mIntegration() As Boolean
+    Private mCount As Long
+
+    ' One saved registry, so a test can run the runner on its own sample tests.
+    Private sNames() As String
+    Private sModules() As Long
+    Private sIndexes() As Long
+    Private sIntegration() As Boolean
+    Private sCount As Long
+
+    Private mCanaryHits As Long
+    Private mFixtureFolder As String    ' Fixture's per-run copies (D-051)
+
+    ' Calls RunTest on the module with that MODULE_ID. Add a Case for every new Tests_* module.
+    Private Sub Dispatch(ByVal moduleId As Long, ByVal index As Long)
+        Select Case moduleId
+            Case SelfTestCanary.MODULE_ID: SelfTestCanary.RunTest index
+            Case Tests_Cli.MODULE_ID: Tests_Cli.RunTest index
+            Case Tests_Runner.MODULE_ID: Tests_Runner.RunTest index
+            Case Tests_Model.MODULE_ID: Tests_Model.RunTest index
+            Case Tests_TypeMap.MODULE_ID: Tests_TypeMap.RunTest index
+            Case Tests_Naming.MODULE_ID: Tests_Naming.RunTest index
+            Case Tests_Macros.MODULE_ID: Tests_Macros.RunTest index
+            Case Tests_Docs.MODULE_ID: Tests_Docs.RunTest index
+            Case Tests_Emitter.MODULE_ID: Tests_Emitter.RunTest index
+            Case Tests_EndToEnd.MODULE_ID: Tests_EndToEnd.RunTest index
+            Case Tests_Doctor.MODULE_ID: Tests_Doctor.RunTest index
+            Case Tests_Perf.MODULE_ID: Tests_Perf.RunTest index
+            Case Else: Err.Raise CHECK_FAILED, , "no test module " & moduleId
+        End Select
+    End Sub
+
+    ' Every test module's Register, in order.
+    Private Sub RegisterAll()
+        Tests_Cli.Register
+        Tests_Runner.Register
+        Tests_Model.Register
+        Tests_TypeMap.Register
+        Tests_Naming.Register
+        Tests_Macros.Register
+        Tests_Docs.Register
+        Tests_Emitter.Register
+        Tests_EndToEnd.Register
+        Tests_Doctor.Register
+        Tests_Perf.Register
+    End Sub
+
+    ' Registers test number index of module moduleId. Integration tests touch external tools and
+    ' run only with --integration.
+    Public Sub Add(ByVal name As String, ByVal moduleId As Long, ByVal index As Long, Optional ByVal integration As Boolean = False)
+        If mCount = 0 Then
+            ReDim mNames(0 To 63)
+            ReDim mModules(0 To 63)
+            ReDim mIndexes(0 To 63)
+            ReDim mIntegration(0 To 63)
+        ElseIf mCount > UBound(mNames) Then
+            ReDim Preserve mNames(0 To 2 * mCount - 1)
+            ReDim Preserve mModules(0 To 2 * mCount - 1)
+            ReDim Preserve mIndexes(0 To 2 * mCount - 1)
+            ReDim Preserve mIntegration(0 To 2 * mCount - 1)
+        End If
+        mNames(mCount) = name
+        mModules(mCount) = moduleId
+        mIndexes(mCount) = index
+        mIntegration(mCount) = integration
+        mCount += 1
+    End Sub
+
+    Public Sub Clear()
+        mCount = 0
+    End Sub
+
+    Public Sub PushRegistry()
+        sNames = mNames
+        sModules = mModules
+        sIndexes = mIndexes
+        sIntegration = mIntegration
+        sCount = mCount
+        mCount = 0
+    End Sub
+
+    Public Sub PopRegistry()
+        mNames = sNames
+        mModules = sModules
+        mIndexes = sIndexes
+        mIntegration = sIntegration
+        mCount = sCount
+    End Sub
+
+    ' Registers every test module, runs the tests (integration ones only when asked), prints
+    ' one line per test and a total, and returns the number of failures (0 = all passed).
+    Public Function RunAll(ByVal integration As Boolean) As Long
+        Clear
+        RegisterAll
+        Console.WriteOut "tbBlob self-test" & IIf(integration, " (with integration tests)", "")
+        Dim failed As Long = RunRegistered(integration)
+        RemoveFixtures
+        Return failed
+    End Function
+
+    ' Runs the registered tests without registering the standard modules first; used by RunAll
+    ' and by tests of the runner itself. Returns the number of failures.
+    Public Function RunRegistered(ByVal integration As Boolean) As Long
+        Dim i As Long, passed As Long, failed As Long
+        Dim problem As String = RunnerProblem()
+        If Len(problem) > 0 Then
+            Console.WriteOut "  [FAIL] runner self-check: " & problem
+            Return 1
+        End If
+        For i = 0 To mCount - 1
+            If integration Or Not mIntegration(i) Then
+                If RunOne(i) Then passed += 1 Else failed += 1
+            End If
+        Next
+        Console.WriteOut passed & "/" & (passed + failed) & " tests passed."
+        Return failed
+    End Function
+
+    ' "" when the runner can both run a test and see an error raised in it, number and message
+    ' intact; else what is wrong.
+    Private Function RunnerProblem() As String
+        mCanaryHits = 0
+        On Error GoTo CallFailed
+        Dispatch SelfTestCanary.MODULE_ID, 1
+        On Error GoTo 0
+        If mCanaryHits <> 1 Then Return "a test did not run"
+        On Error GoTo Raised
+        Dispatch SelfTestCanary.MODULE_ID, 2
+        On Error GoTo 0
+        Return "an error raised inside a test did not reach the runner"
+    Raised:
+        If Err.Number <> CHECK_FAILED Or Err.Description <> "canary" Then
+            Return "the canary's error arrived as " & Err.Number & " " & Err.Description
+        End If
+        Return ""
+    CallFailed:
+        Return "calling a test failed: " & Err.Description
+    End Function
+
+    Public Sub CanaryHit()
+        mCanaryHits += 1
+    End Sub
+
+    Private Function RunOne(ByVal i As Long) As Boolean
+        On Error GoTo Failed
+        Dispatch mModules(i), mIndexes(i)
+        Console.WriteOut "  [PASS] " & mNames(i)
+        Return True
+    Failed:
+        Console.WriteOut "  [FAIL] " & mNames(i)
+        Console.WriteOut "         " & Err.Description
+        Return False
+    End Function
+
+    Public Sub AssertTrue(ByVal name As String, ByVal condition As Boolean, Optional ByVal detail As String = "")
+        If Not condition Then Err.Raise CHECK_FAILED, , name & IIf(Len(detail) > 0, ": " & detail, "")
+    End Sub
+
+    Public Sub AssertEq(ByVal name As String, ByVal actual As Variant, ByVal expected As Variant)
+        If CStr(actual) <> CStr(expected) Then
+            Err.Raise CHECK_FAILED, , name & ": actual=[" & CStr(actual) & "] expected=[" & CStr(expected) & "]"
+        End If
+    End Sub
+
+    ' The repository root: tbBlob_win64.exe lives in <root>\Build.
+    Public Function RepoRoot() As String
+        Return FileSys.FullPath(App.Path & "\..")
+    End Function
+
+    ' The path of tests\testdata\fixture\<file> as a copy in a per-run temp folder, with the {REPO}
+    ' placeholder replaced by this clone's root (D-051). CastXML writes absolute paths and the
+    ' committed snapshots must not hold the generating machine's, so they carry {REPO} instead.
+    Public Function Fixture(ByVal file As String) As String
+        If Len(mFixtureFolder) = 0 Then mFixtureFolder = NewTempFolder()
+        Dim target As String = mFixtureFolder & "\" & file
+        If FileSys.KindOf(target) <> FileSys.KIND_FILE Then
+            Dim text As String = FileSys.ReadTextUtf8(RepoRoot() & "\tests\testdata\fixture\" & file)
+            FileSys.WriteTextUtf8 target, Replace(text, "{REPO}", RepoRoot())
+        End If
+        Return target
+    End Function
+
+    ' Removes the folder Fixture made (RunAll calls it when the run ends).
+    Public Sub RemoveFixtures()
+        If Len(mFixtureFolder) > 0 Then FileSys.RemovePath mFixtureFolder
+        mFixtureFolder = ""
+    End Sub
+
+    ' An information line in the test output (e.g. a timing); does not affect pass/fail.
+    Public Sub Info(ByVal text As String)
+        Console.WriteOut "  [INFO] " & text
+    End Sub
+
+    ' A new empty folder under %TEMP% for a test; the caller removes it with FileSys.RemovePath.
+    Public Function NewTempFolder() As String
+        Return FileSys.MakeTempFolder(FileSys.TempFolder() & "\tbBlob-test-")
+    End Function
+End Module

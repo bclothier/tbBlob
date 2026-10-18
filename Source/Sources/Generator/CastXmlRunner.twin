@@ -1,0 +1,208 @@
+' Finds castxml.exe and the MSVC environment, and runs the four CastXML passes (x86 XML, x64
+' XML, x86 and x64 macro dumps -- D-030) through .cmd scripts written to the work folder (D-017).
+' PRD req. 5-9.
+Module CastXmlRunner
+    ' The 0xC0000135 (STATUS_DLL_NOT_FOUND) exit code of a program Windows could not start.
+    Public Const STATUS_DLL_NOT_FOUND As Long = &HC0000135
+
+    ' castxml.exe: argPath if given (and it must exist), else envValue (the CASTXML variable),
+    ' else the CastXML bundled next to tbBlob (<exeDir>\castxml\bin\castxml.exe, D-035), else the
+    ' first PATH folder that holds castxml.exe; "" when none is found.
+    Public Function FindCastXmlIn(ByVal argPath As String, ByVal envValue As String, ByVal exeDir As String, ByVal pathValue As String) As String
+        Dim folder As Variant, candidate As String
+        If Len(argPath) > 0 Then
+            If FileSys.KindOf(argPath) = FileSys.KIND_FILE Then Return argPath
+            Return ""
+        End If
+        If Len(envValue) > 0 Then
+            If FileSys.KindOf(envValue) = FileSys.KIND_FILE Then Return envValue
+        End If
+        If Len(exeDir) > 0 Then
+            candidate = BundledCastXml(exeDir)
+            If FileSys.KindOf(candidate) = FileSys.KIND_FILE Then Return candidate
+        End If
+        For Each folder In Split(pathValue, ";")
+            folder = Trim$(folder)
+            If Len(folder) > 0 Then
+                If Right$(folder, 1) = "\" Then candidate = folder & "castxml.exe" Else candidate = folder & "\castxml.exe"
+                If FileSys.KindOf(candidate) = FileSys.KIND_FILE Then Return candidate
+            End If
+        Next
+        Return ""
+    End Function
+
+    ' FindCastXmlIn with the real CASTXML and PATH variables.
+    Public Function FindCastXml(ByVal argPath As String) As String
+        Return FindCastXmlIn(argPath, Environ$("CASTXML"), App.Path, Environ$("PATH"))
+    End Function
+
+    ' Where a CastXML bundled with tbBlob lives (tools\package.ps1 puts it there).
+    Public Function BundledCastXml(ByVal exeDir As String) As String
+        Return exeDir & "\castxml\bin\castxml.exe"
+    End Function
+
+    ' A header castxml.exe needs from its own share folder (clang's resource headers): it looks
+    ' for them at ..\share\castxml\clang\include next to its bin folder.
+    Public Function ResourceHeaderPath(ByVal castxml As String) As String
+        Return FileSys.ParentOf(FileSys.ParentOf(castxml)) & "\share\castxml\clang\include\stddef.h"
+    End Function
+
+    ' True when path starts with a Windows executable header (MZ, then PE at e_lfanew). Checked
+    ' before running castxml.exe: running a file that is not a program (empty, truncated) makes
+    ' Windows show a "This app can't run on your PC" dialog instead of failing quietly.
+    Public Function LooksLikeProgram(ByVal path As String) As Boolean
+        If FileSys.KindOf(path) <> FileSys.KIND_FILE Then Return False
+        Dim f As Integer = FreeFile
+        Dim b(0 To 1023) As Byte
+        On Error GoTo failed
+        Open path For Binary Access Read As #f
+        If LOF(f) < 1024 Then
+            Close #f
+            Return False
+        End If
+        Get #f, 1, b
+        Close #f
+        If b(0) <> &H4D Or b(1) <> &H5A Then Return False
+        Dim pe As Long = CLng(b(60)) + CLng(b(61)) * &H100& + CLng(b(62)) * &H10000
+        If pe < 64 Or pe > 1020 Then Return False
+        Return b(pe) = &H50 And b(pe + 1) = &H45 And b(pe + 2) = 0 And b(pe + 3) = 0
+    failed:
+        Close #f
+        Return False
+    End Function
+
+    ' What a castxml exit code means when it is not CastXML's own failure; "" otherwise.
+    Public Function ExplainExit(ByVal code As Long) As String
+        If code = STATUS_DLL_NOT_FOUND Then
+            Return "castxml.exe could not start because a DLL it needs is missing (the MSVC runtime): install the " & _
+                "Microsoft Visual C++ Redistributable 2015-2022 (x64), https://aka.ms/vs/17/release/vc_redist.x64.exe"
+        End If
+        Return ""
+    End Function
+
+    ' The Visual Studio / Build Tools folder that has the C++ tools, from vswhere; "" if none.
+    Public Function FindVsPath(Optional ByVal vswhere As String = "") As String
+        If Len(vswhere) = 0 Then vswhere = Doctor.VswherePath()
+        If FileSys.KindOf(vswhere) <> FileSys.KIND_FILE Then Return ""
+        If Tools.RunCommand(Tools.Quote(vswhere) & " -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath") <> 0 Then Return ""
+        Dim lines() As String = Split(Replace(Tools.LastToolOutput, vbCr, ""), vbLf)
+        Return Trim$(lines(0))
+    End Function
+
+    ' vcvars32.bat (arch "x86") or vcvars64.bat (arch "x64") under vsPath; "" if missing.
+    Public Function FindVcvarsIn(ByVal vsPath As String, ByVal arch As String) As String
+        If Len(vsPath) = 0 Then Return ""
+        Dim path As String = vsPath & "\VC\Auxiliary\Build\vcvars" & IIf(arch = "x86", "32", "64") & ".bat"
+        If FileSys.KindOf(path) = FileSys.KIND_FILE Then Return path
+        Return ""
+    End Function
+
+    ' The text of Work\tbblob_entry.h: #include of the entry header, then of each --also header.
+    ' Forward slashes: MSVC and clang accept them, and they need no escaping in a #include.
+    Public Function EntryFileText(ByVal entryHeader As String, alsoHeaders As Collection) As String
+        Dim s As String = "/* GENERATED by tbBlob: the entry header, then each --also header (D-033). */" & vbCrLf
+        s &= "#include """ & Replace(entryHeader, "\", "/") & """" & vbCrLf
+        Dim h As Variant
+        For Each h In alsoHeaders
+            s &= "#include """ & Replace(h, "\", "/") & """" & vbCrLf
+        Next
+        Return s
+    End Function
+
+    ' The .cmd script for one pass: calls vcvars, then castxml. macros = True gives the -E -dM
+    ' macro dump; else the XML (--castxml-output=1). Paths are quoted; one -I per include folder
+    ' (the header folder first), one -D per define.
+    Public Function BuildScript(ByVal vcvars As String, ByVal castxml As String, ByVal headerFolder As String, includeDirs As Collection, defines As Collection, ByVal entryHeader As String, ByVal outPath As String, ByVal macros As Boolean) As String
+        Dim s As String, v As Variant
+        s = "@call " & Tools.Quote(vcvars) & " >nul 2>nul" & vbCrLf
+        s &= Tools.Quote(castxml) & " --castxml-cc-msvc-c cl"
+        If macros Then
+            ' -o goes with the other options below; -E -dM must come first.
+            s &= " -E -dM -o " & Tools.Quote(outPath)
+        Else
+            s &= " --castxml-output=1"
+        End If
+        s &= " -I " & Tools.Quote(headerFolder)
+        For Each v In includeDirs
+            s &= " -I " & Tools.Quote(v)
+        Next
+        For Each v In defines
+            s &= " -D " & Tools.Quote(v)
+        Next
+        If Not macros Then s &= " -o " & Tools.Quote(outPath)
+        s &= " " & Tools.Quote(entryHeader) & vbCrLf
+        Return s
+    End Function
+
+    ' Runs the four passes (XML and macro dump, x86 and x64, D-030) for o into workFolder (created if missing). vsPathOverride replaces
+    ' vswhere's answer (tests). ExitCode: 0 ok, 1 castxml failed, 4 castxml or MSVC not found.
+    Public Function RunCastXml(o As CliOptions, ByVal workFolder As String, Optional ByVal vsPathOverride As String = "") As CastXmlResult
+        Dim r As New CastXmlResult
+        Dim castxml As String = FindCastXml(o.CastXmlPath)
+        If Len(castxml) = 0 Then
+            r.ExitCode = MainModule.EXIT_TOOL_NOT_FOUND
+            r.ErrorText = "castxml.exe not found (looked at --castxml, the CASTXML variable, castxml\bin\castxml.exe next to tbBlob.exe, then PATH)" & IIf(Len(o.CastXmlPath) > 0, ": " & o.CastXmlPath, "")
+            Return r
+        End If
+        Dim vs As String = vsPathOverride
+        If Len(vs) = 0 Then vs = FindVsPath()
+        Dim vc32 As String = FindVcvarsIn(vs, "x86")
+        Dim vc64 As String = FindVcvarsIn(vs, "x64")
+        If Len(vc32) = 0 Or Len(vc64) = 0 Then
+            r.ExitCode = MainModule.EXIT_TOOL_NOT_FOUND
+            If Len(vs) = 0 And FileSys.KindOf(Doctor.VswherePath()) <> FileSys.KIND_FILE Then
+                r.ErrorText = "Visual Studio not found: " & Doctor.VswherePath() & " does not exist -- install Visual Studio 2022 or the Build Tools for Visual Studio 2022 with the 'Desktop development with C++' workload (tbBlob --check lists every dependency)"
+            Else
+                r.ErrorText = "MSVC vcvars not found (vcvars32.bat and vcvars64.bat under '" & vs & "\VC\Auxiliary\Build') -- install Visual Studio or the Build Tools with the 'Desktop development with C++' workload (tbBlob --check lists every dependency)"
+            End If
+            Return r
+        End If
+        Dim resource As String = ResourceHeaderPath(castxml)
+        If FileSys.KindOf(resource) <> FileSys.KIND_FILE Then
+            r.ExitCode = MainModule.EXIT_TOOL_NOT_FOUND
+            r.ErrorText = "CastXML's resource headers not found: " & FileSys.ParentOf(resource) & " -- castxml.exe needs the share\castxml folder that comes with it; keep CastXML's bin and share folders together (tbBlob --check lists every dependency)"
+            Return r
+        End If
+        If Not LooksLikeProgram(castxml) Then
+            r.ExitCode = MainModule.EXIT_TOOL_NOT_FOUND
+            r.ErrorText = castxml & " is not a valid program (no Windows executable header; empty or damaged?) -- reinstall CastXML (tbBlob --check lists every dependency)"
+            Return r
+        End If
+
+        FileSys.MakeDirs workFolder
+        Dim work As String = FileSys.FullPath(workFolder)
+        Dim headerFolder As String = FileSys.FullPath(o.HeaderFolder)
+        Dim entry As String = FileSys.JoinPath(headerFolder, o.EntryHeader)
+        If o.AlsoHeaders.Count > 0 Then
+            ' D-033: CastXML takes one input file, so the entry header and the --also headers go in one
+            Dim full As New Collection, h As Variant
+            For Each h In o.AlsoHeaders
+                full.Add FileSys.JoinPath(headerFolder, h)
+            Next
+            FileSys.WriteTextUtf8 work & "\tbblob_entry.h", EntryFileText(entry, full)
+            entry = work & "\tbblob_entry.h"
+        End If
+        r.Xml86Path = work & "\castxml_x86.xml"
+        r.Xml64Path = work & "\castxml_x64.xml"
+        r.Macros86Path = work & "\macros_x86.txt"
+        r.Macros64Path = work & "\macros_x64.txt"
+        If Not RunPass(r, "x86", BuildScript(vc32, castxml, headerFolder, o.IncludeDirs, o.Defines, entry, r.Xml86Path, False), work, r.Xml86Path) Then Return r
+        If Not RunPass(r, "x64", BuildScript(vc64, castxml, headerFolder, o.IncludeDirs, o.Defines, entry, r.Xml64Path, False), work, r.Xml64Path) Then Return r
+        If Not RunPass(r, "macros_x86", BuildScript(vc32, castxml, headerFolder, o.IncludeDirs, o.Defines, entry, r.Macros86Path, True), work, r.Macros86Path) Then Return r
+        If Not RunPass(r, "macros_x64", BuildScript(vc64, castxml, headerFolder, o.IncludeDirs, o.Defines, entry, r.Macros64Path, True), work, r.Macros64Path) Then Return r
+        Return r
+    End Function
+
+    ' Writes and runs castxml_<name>.cmd; False (with r filled in) when castxml failed.
+    Private Function RunPass(r As CastXmlResult, ByVal name As String, ByVal script As String, ByVal work As String, ByVal outPath As String) As Boolean
+        Dim scriptPath As String = work & "\castxml_" & name & ".cmd"
+        FileSys.WriteTextUtf8 scriptPath, script
+        If FileSys.KindOf(outPath) = FileSys.KIND_FILE Then FileSys.RemovePath outPath
+        Dim code As Long = Tools.RunCommand(Tools.Quote(scriptPath))
+        If code = 0 And FileSys.KindOf(outPath) = FileSys.KIND_FILE Then Return True
+        r.ExitCode = MainModule.EXIT_FAILED
+        r.ErrorText = "castxml failed (" & name & " pass, exit " & code & "; script " & scriptPath & "):" & vbLf & Tools.LastToolOutput
+        If Len(ExplainExit(code)) > 0 Then r.ErrorText &= vbLf & ExplainExit(code)
+        Return False
+    End Function
+End Module

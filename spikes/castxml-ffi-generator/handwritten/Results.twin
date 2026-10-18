@@ -1,0 +1,49 @@
+' SPIKE throwaway: writes one line per check to results\results-<arch>.txt, flushed per line.
+' (Named Results, not Log: Log is a built-in VB math function.)
+Module Results
+    Public Const SPIKE_DIR As String = "C:\GitHub\tbBlob\spikes\castxml-ffi-generator"
+    Private ResultsPath As String
+    Public Passed As Long
+    Public Failed As Long
+
+    Public Function Arch() As String
+        #If Win64 Then
+            Return "win64"
+        #Else
+            Return "win32"
+        #End If
+    End Function
+
+    Public Sub Start()
+        If Len(Dir$(SPIKE_DIR & "\results", vbDirectory)) = 0 Then MkDir SPIKE_DIR & "\results"
+        ResultsPath = SPIKE_DIR & "\results\results-" & Arch() & ".txt"
+        Dim f As Integer = FreeFile
+        Open ResultsPath For Output As #f
+        Close #f
+    End Sub
+
+    Private Sub WriteLine(ByVal text As String)
+        Dim f As Integer = FreeFile
+        Open ResultsPath For Append As #f
+        Print #f, text
+        Close #f
+        Debug.Print text
+    End Sub
+
+    Public Sub Check(ByVal name As String, ByVal ok As Boolean, Optional ByVal detail As String = "")
+        If ok Then Passed += 1 Else Failed += 1
+        WriteLine IIf(ok, "PASS ", "FAIL ") & name & IIf(Len(detail), " | " & detail, "")
+    End Sub
+
+    Public Sub CheckEq(ByVal name As String, ByVal actual As Variant, ByVal expected As Variant)
+        Check name, CStr(actual) = CStr(expected), "actual=" & CStr(actual) & " expected=" & CStr(expected)
+    End Sub
+
+    Public Sub Info(ByVal name As String, ByVal detail As String)
+        WriteLine "INFO " & name & " | " & detail
+    End Sub
+
+    Public Sub Fail(ByVal name As String, ByVal detail As String)
+        Check name, False, detail
+    End Sub
+End Module

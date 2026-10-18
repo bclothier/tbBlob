@@ -1,0 +1,5 @@
+# CastXML snapshots in tests\testdata\fixture record byte offsets into tests\fixture-c\tbfixture.h
+# (doc comments, task 8). Keep the header and the test data exactly as committed (no EOL
+# conversion), or a fresh checkout would shift every offset.
+tests/fixture-c/tbfixture.h -text
+tests/testdata/** -text
