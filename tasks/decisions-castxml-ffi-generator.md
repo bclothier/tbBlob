@@ -68,6 +68,14 @@
 | D-049 | 22.0 (new) | Plan | Dependencies documented by purpose (run / build / test), getting vcpkg, package.ps1 names the CastXML install command; no auto-install | Active |
 | D-050 | 23.0 (new) | Task-only | LibGit2Counts generates its own libgit2 XML instead of reading gitignored spike output; docs state what a first run on a clean clone reports | Active |
 | D-051 | 24.0 (new) | Task-only | Fixture snapshots store {REPO}; tests resolve it to the real repo root (SelfTest.Fixture); no absolute paths in test data | Active |
+| D-052 | cairo (assessment) | Finding | cairo 1.18.4: 419 of 425 exports generated; outside types dangle; one DLL per run duplicates cairo.h | Active |
+| D-053 | 26.0 (new) | Plan | Bind each function to the DLL whose export table has it (DLL file or folder) | Active |
+| D-054 | SPIKE-11, 27.0, 28.0 (new) | Plan | Import outside types into header-named modules; LongPtr aliases only where C/SDK make it certain; --qualify-outside, --pointer | Active |
+| D-055 | 29.0, 30.0 (new) | Plan | cairo becomes the second proof library: generation, compile and layout tests, then a runtime harness | Active |
+| D-056 | 25.0 (new) | Task-only | Arguments ending in a backslash break the quoted CastXML command line; quote by the C runtime rules | Active |
+| D-057 | 26a.0 (new) | Plan | A header CastXML cannot read is skipped (traced via tbblob_entry.h) and reported, not fatal | Active |
+| D-058 | 27.0 (new) | Plan | A pointer to a COM interface (MIDL lpVtbl shape) becomes LongPtr /* IName */ | Active |
+| D-059 | 29.0, 30.0 | Plan | cairo-dwrite.h: 5 hand-written declares, documented and tested; cairo run proves the header skip | Active |
 
 ---
 ### D-001 — tB UDT layout equals C natural alignment for all 85 libgit2 structs, both archs (Task: Spike)
@@ -671,3 +679,111 @@
 - Decision: commit the snapshots with `{REPO}` in place of the repository root; `regen-fixture-xml.ps1` writes it; tests load a per-run copy with `{REPO}` replaced by `SelfTest.RepoRoot()` (`SelfTest.Fixture`). A unit test fails if a snapshot holds any other path to `tests\fixture-c`.
 - Rationale: the tests' own paths were already relative to the EXE; only the snapshot was not, and CastXML cannot emit relative paths. A placeholder keeps the snapshots real CastXML output apart from one token.
 - Alternatives considered: regenerating the XML with CastXML in every unit test (slow, turns unit tests into integration tests, needs MSVC); passing the baked-in path as the header folder (the file must exist at that path for doc comments); matching header folders by path suffix in `CxModel` (changes production behaviour for a test-data problem).
+
+---
+### D-052 — cairo 1.18.4: 419 of 425 exports generated; outside types dangle; one DLL per run duplicates cairo.h (Task: cairo assessment)
+- Date: 2026-10-22
+- Scope: Finding
+- Status: Active
+- Context: the user (2026-10-21) asked whether tbBlob can generate every cairo function, as a second library after libgit2. cairo's headers are spread out: `cairo.h` includes only `cairo-version.h`, `cairo-features.h` and `cairo-deprecated.h`; each backend has its own header that `cairo.h` does not include; `cairo-ft.h` reaches FreeType and fontconfig outside `include\cairo`, `cairo-win32.h` includes `windows.h`; `cairo-script-interpreter.h` belongs to a second DLL. An earlier attempt (`C:\GitHub\tbCairo\tbBlob`, entry `cairo.h` + `--also cairo-features.h` only) bound 345 functions.
+- Decision (observed):
+  - Run 1: header folder `include\cairo`, entry `cairo.h`, DLL `cairo-2.dll`, `-I include` (for `ft2build.h`), `--also` `cairo-pdf.h`, `cairo-ps.h`, `cairo-svg.h`, `cairo-script.h`, `cairo-tee.h`, `cairo-win32.h`, `cairo-ft.h`. Exit 0, 409 functions, no mapping notes, no x86/x64 disagreements. Compared with `dumpbin /exports cairo-2.dll` (415): every generated function is exported; the 6 not generated are the 5 `cairo_dwrite_*` (`cairo-dwrite.h` has `#error DWrite font backend requires C++` when read as C) and `cairo_win32_get_system_text_quality` (exported, but in no public header).
+  - Run 2: entry `cairo-script-interpreter.h`, DLL `cairo-script-interpreter-2.dll`: its 10 exports all generated, but `cairo.h` sits in the same header folder, so the run also emitted all 345 `cairo.h` functions bound to `cairo-script-interpreter-2.dll`, and a second `cairo` module. Library membership is decided by folder (`CxModel.InLibrary`), the DLL only by the command line.
+  - The output does not compile: 16 declares name types that are never emitted, because `TypeMapper.RecordOrOpaque` classifies a struct without asking `Model.InLibrary`, while the emitter only emits library records and opaque aliases. Affected: `cairo_win32` (`ByRef HDC__`, `HFONT__`, `tagLOGFONTW`), `cairo_ft` (`ByRef FT_FaceRec_`, `ByVal FcPattern`), `cairo_script_interpreter` (`ByRef _iobuf` for `FILE*`). Inconsistent with `ReturnOf`, which already returns `LongPtr` for any pointer to a non-opaque struct. CastXML had resolved them all: `HDC__`/`HFONT__` 4 bytes (`shared\windef.h`, `DECLARE_HANDLE`), `tagLOGFONTW` 92 (`um\wingdi.h`), `_iobuf` 8 (`ucrt\corecrt_wstdio.h`: `struct _iobuf { void* _Placeholder; }`), `FT_FaceRec_` 216 (`freetype\freetype.h`), `FcPattern` incomplete. libgit2 never hit this: its API names no outside struct.
+- Verified under: cairo 1.18.4 from vcpkg (x64-windows only, `C:\GitHub\tbCairo\cairo`), the packaged `dist\tbBlob\tbBlob.exe` of the first public release, CastXML 0.6.5, Windows SDK 10.0.26100.0, MSVC 2022 Enterprise. Generated code not compiled (the dangling names are certain from the text). No x86 cairo DLL, so `--x86-dll` was not exercised (cairo is all cdecl).
+- Consequence: D-053 (function → DLL from export tables), D-054 (outside types), D-055 (cairo as a proof library).
+
+---
+### D-053 — Bind each function to the DLL whose export table has it (Task 26.0 (new))
+- Date: 2026-10-22
+- Scope: Plan
+- Status: Active
+- Context: D-052 run 2. The user (2026-10-22): rather than mapping headers to DLLs by hand, accept the DLL or a folder of DLLs and read the export tables, since a function the headers declare but no DLL exports cannot be called; the export table is authoritative. `PeExports.ExportNames` already reads PE32 and PE32+ (D-026), so far only for `--x86-dll`.
+- Decision:
+  - `<dll>` may be a DLL file or a folder. tbBlob reads the x64 export table of each DLL (each `*.dll` directly in the folder) and binds every library function to the DLL that exports it (`Lib "<file name>"`). `--x86-dll` may likewise be a file or folder; it keeps deciding plain vs `_name@N` per `__stdcall` function (D-026), now per DLL.
+  - Exported by no DLL: no declare; listed in the report ("Declared but not exported", now skipped rather than emitted with a `NOTE:`).
+  - Exported by more than one DLL: generation fails, naming the function and the DLLs; `--dll <function or header>=<dll file name>` settles it. Other libraries' DLLs in the folder (vcpkg `bin` holds freetype, zlib, ...) are harmless: only library functions are looked up.
+  - A bare name that is not an existing file or folder keeps today's behaviour: every function binds to that name, nothing is checked (generating where the DLL is absent).
+  - The report lists each DLL and its function count. It also lists, per bound DLL, the exports that no library header declares ("Exported but not declared": for cairo, the 5 `cairo_dwrite_*` and `cairo_win32_get_system_text_quality`), so a header left out or a C++-only header is visible. The Loader loads every DLL the project binds to, in the order they first appear, from the same folder rules (D-027).
+- Rationale: the export table is the only authority on where a function lives; it handles cairo's two DLLs in one run with one copy of the cairo types, and needs no per-header configuration.
+- Alternatives considered: `--dll <header>=<dll>` mapping as the main mechanism (manual, and wrong whenever a header's functions live in two DLLs); a second run treating `cairo.h` as outside (would import cairo's own types again under D-054); only filtering by the one given DLL (cannot bind the interpreter's 10 functions in the same project).
+
+---
+### D-054 — Import outside types into header-named modules; LongPtr aliases only where C/SDK make it certain; --qualify-outside, --pointer (SPIKE-11, Tasks 27.0, 28.0 (new))
+- Date: 2026-10-22
+- Scope: Plan
+- Status: Active
+- Context: D-052's dangling types. Discussed with the user (2026-10-21/22): a pointer is passed as one address whatever the struct's size, so `ByVal LongPtr` is exact for any pointer; a struct passed or returned by value, or embedded as a field, is copied (x86: whole struct on the stack; x64: 1/2/4/8 bytes in a register, else a pointer to a caller copy; returns may use a hidden pointer) and needs its real layout. C refuses by-value use of an incomplete struct, so whenever by-value use occurs CastXML has the full layout. The user: import outside structs rather than collapse them, and accept name clashes with packages (a local module takes priority in tB; the module name disambiguates).
+- Decision:
+  - **Outside type** = a struct, union, enum or typedef declared in a header not under the header folder (Windows SDK, CRT, other libraries) that a library declaration uses. It is emitted into a module named after its header, by the same rule as library modules (`Naming.ModuleName`, relative to its include root): `windef`, `wingdi`, `corecrt_wstdio`, `freetype`, ... Every type it needs is imported too (transitive closure; `FT_FaceRec_` brings `FT_Generic`, `FT_BBox`, ...). Its layout is checked like a library record (LayoutCheck, x86/x64 comparison).
+  - **Pointer-only kinds become `Public Alias X As LongPtr`, no struct**, only where it is certain:
+    - incomplete (opaque) structs: CastXML marks them incomplete (`FcPattern`; the rule tbBlob already applies to `cairo_t`);
+    - Windows handles: the exact `DECLARE_HANDLE` expansion (`struct X__ { int unused; }` with `typedef X__ *X`): `HDC`, `HFONT`, `HWND`, ...;
+    - a built-in list of standard types that C defines as used only through pointers: `FILE` (C11 §7.21.3: a copy of a `FILE` need not serve in place of the original; UCRT's `_iobuf` is a placeholder). The list starts with `FILE` and grows only on the same kind of evidence.
+  - **Pointer typedef to a complete outside struct** (`typedef struct FT_FaceRec_ *FT_Face`): `Public Alias FT_Face As LongPtr` (the author named the pointer as the handle), and the struct is still emitted for reading fields.
+  - **`T*` to a complete outside struct** (`const LOGFONTW*`): `ByRef As <T>`, the same rule as library structs.
+  - **By value or as a field**: always the real `Type`; never `LongPtr`.
+  - Scope: the alias and spelling rules apply to outside types only; library types keep today's mapping (no change to libgit2 or tbfixture output).
+  - `--qualify-outside`: outside type names are written module-qualified (`wingdi.tagLOGFONTW`) wherever they are used; off by default.
+  - `--pointer <C type name>` (repeatable): that outside struct type is passed and returned as `LongPtr` when reached through a pointer, for the cases no header or standard can tell (a third-party placeholder struct like UCRT's `FILE`, written `T*`). The report lists every outside struct passed `ByRef`, so a candidate is visible.
+  - Report: an "Outside types" section (module, header, kind: imported struct / handle alias / opaque alias / standard pointer type / pointer typedef).
+  - **Unknown before 27.0: SPIKE-11** checks in tB that (1) a `Type` in a module is usable module-qualified (`wingdi.tagLOGFONTW`) as a Declare parameter, return, `Type` field and `Alias` target; (2) a local module's `Type` takes priority over a same-named `Type` from a referenced package, and the qualified name selects either; (3) two local modules defining the same name compile and resolve when qualified.
+- Rationale: generated code must compile and must never misrepresent a by-value struct; aliases are used only where the C language, the Windows SDK's handle convention or CastXML makes "pointer-only" a fact; the rest follows the header author's spelling, with an override for what nothing can determine.
+- Alternatives considered: `ByVal LongPtr` for every pointer to an outside struct (loses `ByRef` struct passing for structs the caller fills, like `LOGFONTW`); not importing outside structs and failing on by-value use (blocks real libraries); module names by DLL, e.g. `User32` (a struct belongs to a header, not a DLL; CastXML cannot tell which DLL); recognising `FILE` by its `_Placeholder` field (a one-header special case; the C standard is the real reason).
+
+---
+### D-055 — cairo becomes the second proof library: generation, compile and layout tests, then a runtime harness (Tasks 29.0, 30.0 (new))
+- Date: 2026-10-22
+- Scope: Plan
+- Status: Active
+- Context: D-052; cairo exercises what libgit2 does not: several DLLs, outside types (Windows SDK, CRT, FreeType, fontconfig), many backend headers, `double`-heavy signatures and struct returns through pointers.
+- Decision: a `cairo\vcpkg.json` beside `libgit2\` (x64 and x86 trees, as libgit2's), an integration test that generates all of cairo in one run (both DLLs as a folder, every C backend header with `--also`) and checks counts against the export tables (all 425 bound except the 5 `cairo_dwrite_*` and `cairo_win32_get_system_text_quality`, each listed in the report), that the output compiles for win32 and win64, and that `LayoutMismatches()` is empty; then `tests\harness-cairo\` draws through the bindings on both architectures (image surface, paths, text, PNG round trip, a Win32 font face from a `LOGFONTW`, the script interpreter). `cairo-dwrite.h` stays out of scope (C++ only); its 5 functions are documented as hand-written declares.
+- Rationale: a second, differently shaped library is the real test of D-053 and D-054; the libgit2 proof (D-032) is the model.
+- Alternatives considered: keeping cairo outside the repo (`C:\GitHub\tbCairo`) as an ad-hoc check (no regression protection).
+
+---
+### D-056 — A path ending in a backslash breaks the quoted CastXML command line (Task 25.0 (new))
+- Date: 2026-10-22
+- Scope: Task-only
+- Status: Active
+- Context: found while preparing the cairo runs (D-052): a header folder given as `C:\inc\` is written into the `.cmd` script as `-I "C:\inc\"`. Under the Microsoft C runtime's argument rules a backslash before a quote escapes it, so the quote does not close and the rest of the command line becomes part of that argument; CastXML then reports "no input files". An uncommitted change in `CastXmlRunner.twin` (`NoTrailingSlash`, applied to `-I` folders) was already in the working tree without a task or decision. The user (2026-10-22): make it its own task, before 26.0.
+- Decision: task 25.0 fixes it at the quoting layer: an argument-quoting helper that doubles the backslashes immediately before the closing quote (`"C:\inc\\"`, read back as `C:\inc\`), used for every argument tbBlob quotes for a program it runs (CastXML's `-I`, `-D`, `-o`, entry header; the import tool's paths). It replaces `NoTrailingSlash`, which left the drive root (`C:\`) and `-D` values broken. `Tools.Quote` stays as it is for `cmd /C` strings, whose parsing is cmd's, not the C runtime's.
+- Rationale: the bug is in quoting, not in paths: the doubling rule is exact for every argument, including `C:\` and a define whose value ends in a backslash; trimming can change meaning (`C:\` → `C:`, the current folder on drive C).
+- Alternatives considered: keep `NoTrailingSlash` (misses the root and `-D`); normalise every path with `FileSys.FullPath` (does not remove a trailing backslash and does not cover `-D`).
+
+---
+### D-057 — A header CastXML cannot read is skipped and reported, not fatal (Task 26a.0 (new))
+- Date: 2026-10-22
+- Scope: Plan
+- Status: Active
+- Context: the user (2026-10-22) asked what skipping `cairo-dwrite.h` (D-055) loses and asked that tbBlob continue and log when it cannot read a header. Observed with the first-release `dist\tbBlob\tbBlob.exe` on cairo 1.18.4: `--also cairo-pdf.h --also cairo-dwrite.h` fails the x86 pass (`cairo-dwrite.h:65:2: error: DWrite font backend requires C++`), exit 1, nothing written, not even `cairo.h`. CastXML's message names the top-level header: `In file included from <Work>\tbblob_entry.h:4`, and each line of `tbblob_entry.h` includes one header (D-033).
+- Decision:
+  - When a CastXML pass fails and its errors trace back (through the "In file included from" chain, outermost frame) to lines of `tbblob_entry.h` that include `--also` headers, tbBlob drops those headers and runs the passes again, until they succeed or the entry header itself fails. A failure in the entry header, or one that cannot be traced to a header, stays fatal (exit 1, as today).
+  - The run then completes with exit 0; the console prints one `tbBlob: warning: skipped <header>: <first error line>` per skipped header; the report gets a "Headers skipped" section (each header, the architecture pass, and CastXML's error lines). `Work\` keeps the failing pass's output (`castxml_<arch>_failed.txt`).
+  - A header skipped on one architecture is skipped on both (one source serves both, D-001).
+  - Applies to the entry file mechanism only (`--also`); with no `--also` there is one header and nothing to skip.
+- Rationale: one unreadable header (C++-only, a missing dependency, a configuration `#error`) should cost that header, not the run; the include chain makes the culprit certain, so nothing is guessed.
+- Alternatives considered: checking each header alone before the real passes (one extra CastXML run per header on every run, ~doubles the time for libgit2+sys); parsing only the error's own file name (wrong when the error is in a header that a top-level header includes, e.g. `dwrite.h` itself); C++ mode (a different feature; D-059).
+
+---
+### D-058 — A pointer to a COM interface becomes `LongPtr /* IName */` (Task 27.0 (new))
+- Date: 2026-10-22
+- Scope: Plan
+- Status: Active
+- Context: the user (2026-10-22): twinBASIC can declare COM interfaces, but writing the `Interface` is a manual step after generation and not tbBlob's job; tbBlob should make those places easy to find, e.g. `As LongPtr /* ISomeComInterface */`. In C, the Windows SDK's MIDL-generated headers declare an interface as `typedef interface IFoo IFoo;` with `interface IFoo { CONST_VTBL struct IFooVtbl *lpVtbl; };` (`interface` is `struct` in C).
+- Decision:
+  - A struct whose only member is `lpVtbl`, a pointer to a struct named `<name>Vtbl`, is a COM interface. That is the exact MIDL C shape, like `DECLARE_HANDLE`'s (D-054). A pointer to it (parameter, return, field, delegate) is emitted `LongPtr /* <name> */`, e.g. `ByVal stream As LongPtr /* IStream */`; a pointer to a pointer (`IFoo **ppOut`) is `ByRef ... As LongPtr /* IFoo */`. The interface struct and its `Vtbl` struct are not imported.
+  - An incomplete (opaque) struct whose name starts with `I` and an upper-case letter is not assumed to be COM: it stays an opaque alias (D-054); the alias name is already searchable.
+  - Report: a "COM interfaces" section listing each interface and where it is used, with a note that `LongPtr` takes `ObjPtr(obj)` of a tB interface reference, and that the user may write the `Interface` and change the type by hand.
+- Rationale: a COM interface pointer is one pointer whatever the interface, so `LongPtr` is exact; the comment keeps the interface's name, so a search finds every place a hand-written `Interface` could replace it. Generating `Interface` declarations from the Vtbl structs is possible but beyond tbBlob's scope (the user's call).
+- Alternatives considered: importing the interface and Vtbl structs as `Type`s (exact layout, useless to call through); generating tB `Interface` blocks from the Vtbl (method order and signatures are there, but IIDs and inheritance need the C++/IDL view).
+
+---
+### D-059 — cairo-dwrite.h: 5 hand-written declares, documented and tested; no C++ mode (Tasks 29.0, 30.0)
+- Date: 2026-10-22
+- Scope: Plan
+- Status: Active
+- Context: `cairo-dwrite.h` (5 functions) needs C++ only because `dwrite.h` declares DirectWrite's interfaces as C++ classes; the functions are `extern "C"`, exported undecorated, and take COM interface pointers (`IDWriteFontFace*`, `IDWriteRenderingParams*`) and a C enum (`DWRITE_MEASURING_MODE`, `dcommon.h`, values 0..2). They matter only to programs that already hold DirectWrite objects (custom font collections, rendering params, GDI-compatible measuring). The user (2026-10-22) chose hand-written declares over a C shim header or C++ support.
+- Decision: 29.0 passes `--also cairo-dwrite.h` on purpose, so the cairo run proves D-057 on a real header (reported as skipped with its `#error`; its 5 functions listed under "Exported but not declared"). `docs\USAGE.md` gives a ready-to-paste `cairo_dwrite.twin` with the 5 declares in D-058's style (`ByVal dwrite_font_face As LongPtr /* IDWriteFontFace */`) and the enum. The cairo harness (30.0) includes that file and checks it: `DWriteCreateFactory` → font file → `IDWriteFontFace`, `cairo_dwrite_font_face_create_for_dwrite_fontface`, set and get the measuring mode, draw text.
+- Rationale: 5 functions do not justify C++ support; documenting and testing the declares makes the gap a paste, not a puzzle.
+- Alternatives considered: a C shim header (must sit under the header folder to count as cairo's, i.e. inside the vcpkg tree); C++ support in tbBlob (classes, overloads, mangling: a separate feature).
