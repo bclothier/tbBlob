@@ -168,6 +168,13 @@ Module Tests_Perf
         e.Init t64, t86, macros, "git2.dll", inc, "git2"
         e.UseX86Macros macros86
         Report "Emitter.Init (names: RegisterLibrary)", Ms(t)
+        If FileSys.KindOf(work & "\preprocessed_x64.i") = FileSys.KIND_FILE Then
+            t = Now64()
+            Dim pp As New PreprocessedSource
+            pp.Load work & "\preprocessed_x64.i"
+            e.UsePreprocessed pp
+            Report "PreprocessedSource.Load (D-060)", Ms(t), pp.Count()
+        End If
         t = Now64()
         e.Generate
         Report "Emitter.Generate", Ms(t)

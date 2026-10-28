@@ -44,7 +44,7 @@ Module Tests_EndToEnd
     ' GenerateFrom on the fixture snapshots into outFolder; console output captured in output.
     Private Function FromSnapshots(ByVal outFolder As String, ByRef output As String) As Long
         Console.StartCapture
-        Dim code As Long = Pipeline.GenerateFrom(Snap("tbfixture_x86.xml"), Snap("tbfixture_x64.xml"), Snap("tbfixture_macros_x86.txt"), Snap("tbfixture_macros_x64.txt"), _
+        Dim code As Long = Pipeline.GenerateFrom(Snap("tbfixture_x86.xml"), Snap("tbfixture_x64.xml"), Snap("tbfixture_macros_x86.txt"), Snap("tbfixture_macros_x64.txt"), Snap("tbfixture_x64.i"), _
             SelfTest.RepoRoot() & "\tests\fixture-c", "tbfixture.dll", "tbfixture", outFolder)
         output = Console.StopCapture()
         Return code
@@ -115,7 +115,7 @@ Module Tests_EndToEnd
         FileSys.WriteTextUtf8 t & "\macros.txt", ""
         Console.StartCapture
         Dim code As Long = Pipeline.GenerateFrom(SelfTest.RepoRoot() & "\tests\testdata\typemap\disagree_x86.xml", _
-            SelfTest.RepoRoot() & "\tests\testdata\typemap\disagree_x64.xml", t & "\macros.txt", t & "\macros.txt", "C:\lib\include", "s.dll", "s", t & "\out")
+            SelfTest.RepoRoot() & "\tests\testdata\typemap\disagree_x64.xml", t & "\macros.txt", t & "\macros.txt", "", "C:\lib\include", "s.dll", "s", t & "\out")
         Dim out As String = Console.StopCapture()
         Dim written As String = Names(t & "\out")
         FileSys.RemovePath t
@@ -187,7 +187,7 @@ Module Tests_EndToEnd
         SelfTest.AssertEq "exit code", code, 0
         SelfTest.AssertEq "output folder", top, "Source;Work;report.md;"
         SelfTest.AssertEq "Source", src, "tbfixture.twin;tbfixture_LayoutCheck.twin;tbfixture_Loader.twin;"
-        SelfTest.AssertEq "Work", work, "castxml_macros_x64.cmd;castxml_macros_x86.cmd;castxml_x64.cmd;castxml_x64.xml;castxml_x86.cmd;castxml_x86.xml;macros_x64.txt;macros_x86.txt;"
+        SelfTest.AssertEq "Work", work, "castxml_macros_x64.cmd;castxml_macros_x86.cmd;castxml_x64.cmd;castxml_x64.xml;castxml_x86.cmd;castxml_x86.xml;macros_x64.txt;macros_x86.txt;preprocessed_x64.i;"
         SelfTest.AssertEq "the .twin files import (test-only check)", importCode, 0
     End Sub
 

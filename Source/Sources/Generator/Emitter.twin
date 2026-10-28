@@ -22,6 +22,7 @@ Class Emitter
     Private mNames As NameTable
     Private mMacros As MacroTable
     Private mMacros86 As MacroTable     ' Nothing: constants from the x64 dump only
+    Private mPre As PreprocessedSource  ' Nothing: callback parameter names are reported lost
     Private mDll As String
     Private mHeaderFolder As String
     Private mProject As String
@@ -59,6 +60,12 @@ Class Emitter
     Public Sub UseX86Macros(macros86 As MacroTable)
         Set mMacros86 = macros86
         mMacros86.AddEnumValues mM86
+    End Sub
+
+    ' The x64 compiler's preprocessed headers, which callback parameter names are read from
+    ' (D-060). Call after Init, before Generate.
+    Public Sub UsePreprocessed(pp As PreprocessedSource)
+        Set mPre = pp
     End Sub
 
     ' ---- plumbing ----------------------------------------------------------------------
@@ -415,7 +422,7 @@ Class Emitter
                 Dim td86 As MSXML2.IXMLDOMElement = mMap86.FindTypedef(mM64.Attr(td, "name"))
                 If Not td86 Is Nothing Then Set fn86 = PointeeFn(mM86, mM86.Attr(td86, "id"))
                 m = ModuleFor(mM64.FileOf(td))
-                Set names = DocComments.ParamNamesFor(mM64, DeclaringTypedef(td), mMap64.ParamsOf(fn).Count, lost)
+                Set names = DocComments.ParamNamesFor(mPre, mM64, DeclaringTypedef(td), mMap64.ParamsOf(fn).Count, lost)
                 If Len(lost) > 0 Then Rep "Parameter names lost", mM64.Attr(td, "name") & ": " & lost
                 AddDoc m, td, ""
                 Add m, "' C: " & mM64.Attr(td, "name") & " = " & mMap64.CTypeText(mM64.Attr(td, "type"))
@@ -433,7 +440,7 @@ Class Emitter
                 Rep "Parameter names lost", s.Name & ": declared inline in a parameter list of " & s.Owner & "; its parameter names are not recovered"
             Else
                 m = ModuleFor(mM64.FileOf(s.Source))
-                Set names = DocComments.ParamNamesFor(mM64, s.Source, mMap64.ParamsOf(s.FnType).Count, lost)
+                Set names = DocComments.ParamNamesFor(mPre, mM64, s.Source, mMap64.ParamsOf(s.FnType).Count, lost)
                 If Len(lost) > 0 Then Rep "Parameter names lost", s.Name & ": " & lost
                 Dim r86 As MSXML2.IXMLDOMElement = mMap86.FindRecord(s.Owner)
                 If Not r86 Is Nothing Then

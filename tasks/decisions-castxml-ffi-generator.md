@@ -76,6 +76,8 @@
 | D-057 | 26a.0 (new) | Plan | A header CastXML cannot read is skipped (traced via tbblob_entry.h) and reported, not fatal | Active |
 | D-058 | 27.0 (new) | Plan | A pointer to a COM interface (MIDL lpVtbl shape) becomes LongPtr /* IName */ | Active |
 | D-059 | 29.0, 30.0 | Plan | cairo-dwrite.h: 5 hand-written declares, documented and tested; cairo run proves the header skip | Active |
+| D-060 | Issue #1 | Task-only | Callback parameter names come from the compiler's preprocessed headers (castxml -E), not the raw header text | Active |
+| D-061 | Issue #1 | Finding | Known issue: CastXML (C mode) cannot read the SDK's webservices.h — two empty enums | Active |
 
 ---
 ### D-001 — tB UDT layout equals C natural alignment for all 85 libgit2 structs, both archs (Task: Spike)
@@ -787,3 +789,29 @@
 - Decision: 29.0 passes `--also cairo-dwrite.h` on purpose, so the cairo run proves D-057 on a real header (reported as skipped with its `#error`; its 5 functions listed under "Exported but not declared"). `docs\USAGE.md` gives a ready-to-paste `cairo_dwrite.twin` with the 5 declares in D-058's style (`ByVal dwrite_font_face As LongPtr /* IDWriteFontFace */`) and the enum. The cairo harness (30.0) includes that file and checks it: `DWriteCreateFactory` → font file → `IDWriteFontFace`, `cairo_dwrite_font_face_create_for_dwrite_fontface`, set and get the measuring mode, draw text.
 - Rationale: 5 functions do not justify C++ support; documenting and testing the declares makes the gap a paste, not a puzzle.
 - Alternatives considered: a C shim header (must sit under the header folder to count as cairo's, i.e. inside the vcpkg tree); C++ support in tbBlob (classes, overloads, mangling: a separate feature).
+
+---
+### D-060 — Callback parameter names come from the compiler's preprocessed headers (Task: issue #1)
+- Date: 2026-10-28
+- Scope: Task-only
+- Status: Active
+- Context: GitHub issue #1: `WS_READ_CALLBACK` (webservices.h:2701) lost all its parameter names because one parameter is `_Out_writes_bytes_to_(maxSize, *actualSize) void* bytes`. D-022 read names from the raw header text, so every macro in a parameter list was a guess: a `(` was taken for a function-pointer declarator, and a parameter built by a macro (`TBF_PARAM(int, first)`) was reported lost. A first fix (skip `_identifier(...)`) only moved the guess to a naming convention; the user asked for something better than blind text parsing.
+- Decision:
+  - The x64 macro pass also runs `castxml -E -std=c11` (same flags, same vcvars call, `|| exit /b 1` between them) into `Work\preprocessed_x64.i`. `PreprocessedSource` maps CastXML's `file:line` to that text through its `# <line> "<file>"` markers; `DocComments.ParamNamesFor` reads the declaration there. The compiler has expanded every macro, so SAL annotations are gone and macro-built parameters are plain C; nothing is recognised by spelling.
+  - A lone identifier after keywords (`const TBF_POINT *`, `struct X *`) is a type, not a name, only when CastXML's model has a typedef/struct/union/enum by that name (it was taken as the name before). MSVC pointer modifiers (`__ptr64`, `__unaligned`, ...) are keywords.
+  - With no preprocessed text (`GenerateFrom(..., "", ...)`), or a declaration not found in it, names are argN and reported lost, saying why.
+  - `-std=c11`: castxml's text-mode `-E` in its default C mode rejects `//` comments on the SDK's `#if` lines (sal.h, 20 errors on `<windows.h>`). CastXML's MSVC emulation still defines no `__STDC_VERSION__` (checked: an `#ifdef __STDC_VERSION__` branch is not taken in the XML pass nor in `-E -std=c11`), and the `-dM` dump is byte-identical with and without the flag.
+- Rationale: the preprocessor already ran with the exact configuration of the XML pass; reading its output removes the whole class of macro guesses instead of adding a rule per macro family. One extra castxml run, no extra vcvars call (~7 s each). `tbf_macro_cb`, formerly the "cannot be parsed" example, is now recovered.
+- Alternatives considered: skip identifiers starting with `_` followed by `(` (a naming convention, the first draft); expand macros from the `-dM` table in tbBlob (re-implements the preprocessor: `#`, `##`, rescanning — SAL needs all of them); a separate fifth pass (one more vcvars call); `-E -dD` in place of `-dM` (changes the input of the tested macro table).
+- Verified under: CastXML 0.6.5 (clang 18.1.3), MSVC 14.44, Windows SDK 10.0.26100; the issue's typedef with `<windows.h>`'s real sal.h gives callbackState, bytes, maxSize, actualSize, asyncContext, error. `webservices.h` itself cannot be read by CastXML in C mode on either installed SDK (two `typedef enum {} ...;` — clang: "use of empty enum", no flag turns it off; the 0.6.20260105 snapshot fails earlier, in winioctl.h): a separate problem.
+
+---
+### D-061 — Known issue: CastXML (C mode) cannot read the SDK's webservices.h (Task: issue #1)
+- Date: 2026-10-28
+- Scope: Finding
+- Status: Active
+- Context: reproducing issue #1 (D-060) with `#include <webservices.h>` failed in the x86 XML pass, before any parameter-name code runs. The reporter's output came from a copy of the header (`C:\tbBlob\test\webservices.h`) whose line numbers match SDK 10.0.26100; how they got it through CastXML is not known.
+- Decision: recorded as a known issue in `docs\USAGE.md` ("Known issues"); not fixed now (user, 2026-10-28). Observed: `webservices.h` has two unconditional `typedef enum { } ...;` (`WS_XML_BUFFER_PROPERTY_ID` line 695, `WS_SECURITY_ALGORITHM_PROPERTY_ID` line 1603). MSVC accepts an empty enum; clang rejects it in C ("use of empty enum") with no warning group to disable: `-fms-extensions`, `-fms-compatibility` and `-Wno-error=microsoft-empty-enum` (unknown to clang 18) all still fail.
+- Rationale: the user chose to note it and return to the cairo work; tbBlob does not edit the SDK's headers.
+- Alternatives considered (for a later fix): ask the reporter how they ran it; C++ mode for such headers (empty enums are valid C++; reopens D-059); a patched copy of the header (tbBlob editing Microsoft's header — advised against). D-057's header skip does not help when the entry header itself includes `webservices.h`.
+- Verified under: CastXML 0.6.5 (clang 18.1.3) with `--castxml-cc-msvc-c cl` and vcvars32; SDK 10.0.22621 and 10.0.26100 (both have the two empty enums). CastXML 0.6.20260105 (clang 21.1.8) fails earlier, in `winioctl.h` (`use of undeclared label 'Cleanup'`).

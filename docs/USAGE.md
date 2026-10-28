@@ -103,6 +103,7 @@ of it the four CastXML passes and about 5 s tbBlob's own work.
     castxml_x64.cmd / .xml   ... and as the x64 compiler sees them
     castxml_macros_x86.cmd, macros_x86.txt   the x86 compiler's macros
     castxml_macros_x64.cmd, macros_x64.txt   the x64 compiler's macros
+    preprocessed_x64.i       the headers after the x64 preprocessor (callback parameter names come from here)
     tbblob_entry.h           only with --also
 ```
 The `.cmd` scripts are exactly what ran. Run one by hand to see CastXML's full output when
@@ -183,3 +184,12 @@ finding. Each entry gives its reason:
 
 Your program needs only the library's DLL at run time. tbBlob, CastXML and Visual Studio are needed
 only to generate.
+
+## Known issues
+
+- **The Windows SDK's `webservices.h` cannot be read.** It declares two enums with no values
+  (`WS_XML_BUFFER_PROPERTY_ID` and `WS_SECURITY_ALGORITHM_PROPERTY_ID`; SDK 10.0.22621 and
+  10.0.26100). MSVC accepts that; Clang, which CastXML is built on, rejects it in C
+  (`webservices.h:695:1: error: use of empty enum`), and no option turns the error off. A library
+  whose headers include `webservices.h` therefore fails in the CastXML pass (exit 1). Not fixed yet
+  (D-061).

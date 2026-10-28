@@ -1,0 +1,105 @@
+' The x64 compiler's preprocessed text of the headers (castxml -E, D-060): every macro expanded
+' (SAL annotations, parameters built by macros) and no comments. Its line markers,
+' # <line> "<file>", say where each line came from, so a declaration CastXML places at file:line
+' can be found in it.
+Class PreprocessedSource
+    Private mLines() As String
+    Private mCount As Long
+    ' One segment per line marker: the lines after it come, in order, from one file.
+    Private mSegFile() As String    ' FileKey of the file
+    Private mSegLine() As Long      ' the file's line number of the segment's first line
+    Private mSegStart() As Long     ' index of that line in mLines
+    Private mSegEnd() As Long       ' index of the segment's last line (mSegStart - 1 if empty)
+    Private mSegCount As Long
+
+    ' Reads castxml -E output.
+    Public Sub Load(ByVal path As String)
+        LoadText FileSys.ReadTextUtf8(path)
+    End Sub
+
+    Public Sub LoadText(ByVal text As String)
+        mLines = Split(Replace(text, vbCr, ""), vbLf)
+        mCount = UBound(mLines) + 1
+        mSegCount = 0
+        ReDim mSegFile(0 To 63)
+        ReDim mSegLine(0 To 63)
+        ReDim mSegStart(0 To 63)
+        ReDim mSegEnd(0 To 63)
+        Dim i As Long, lineNo As Long, file As String
+        For i = 0 To mCount - 1
+            If ParseMarker(mLines(i), lineNo, file) Then
+                If mSegCount > 0 Then mSegEnd(mSegCount - 1) = i - 1
+                If mSegCount > UBound(mSegFile) Then
+                    ReDim Preserve mSegFile(0 To 2 * mSegCount - 1)
+                    ReDim Preserve mSegLine(0 To 2 * mSegCount - 1)
+                    ReDim Preserve mSegStart(0 To 2 * mSegCount - 1)
+                    ReDim Preserve mSegEnd(0 To 2 * mSegCount - 1)
+                End If
+                mSegFile(mSegCount) = FileKey(file)
+                mSegLine(mSegCount) = lineNo
+                mSegStart(mSegCount) = i + 1
+                mSegCount += 1
+            End If
+        Next
+        If mSegCount > 0 Then mSegEnd(mSegCount - 1) = mCount - 1
+    End Sub
+
+    ' True for a line marker, # 12 "C:\\inc\\a.h" 2 (or #line 12 "..."), with its line and file.
+    Private Function ParseMarker(ByVal s As String, ByRef lineNo As Long, ByRef file As String) As Boolean
+        Dim i As Long
+        If Left$(s, 2) = "# " Then
+            i = 3
+        ElseIf Left$(s, 6) = "#line " Then
+            i = 7
+        Else
+            Return False
+        End If
+        Dim j As Long = i
+        Do While Mid$(s, j, 1) Like "#"
+            j += 1
+        Loop
+        If j = i Or Mid$(s, j, 2) <> " """ Then Return False
+        Dim q As Long = InStr(j + 2, s, """")
+        If q = 0 Then Return False
+        lineNo = CLng(Mid$(s, i, j - i))
+        file = Mid$(s, j + 2, q - j - 2)
+        Return True
+    End Function
+
+    ' A file name as a comparable key: / as \, repeated backslashes collapsed (a marker's C string
+    ' doubles them; the SDK's paths have "10//include"), lower case (Windows file names).
+    Public Function FileKey(ByVal path As String) As String
+        Dim s As String = LCase$(Replace(path, "/", "\"))
+        Do While InStr(s, "\\") > 0
+            s = Replace(s, "\\", "\")
+        Loop
+        Return s
+    End Function
+
+    ' The index of the line holding line lineNo of file, or -1 if the text has no such line.
+    Public Function IndexOf(ByVal file As String, ByVal lineNo As Long) As Long
+        Dim key As String = FileKey(file)
+        Dim s As Long
+        For s = 0 To mSegCount - 1
+            If mSegFile(s) = key Then
+                If lineNo >= mSegLine(s) And lineNo - mSegLine(s) <= mSegEnd(s) - mSegStart(s) Then Return mSegStart(s) + lineNo - mSegLine(s)
+            End If
+        Next
+        Return -1
+    End Function
+
+    ' The number of lines, markers included.
+    Public Function Count() As Long
+        Return mCount
+    End Function
+
+    ' The line at index (0-based).
+    Public Function LineAt(ByVal index As Long) As String
+        Return mLines(index)
+    End Function
+
+    ' True for a line that is not C text: a line marker or another directive (#pragma).
+    Public Function IsDirective(ByVal index As Long) As Boolean
+        Return Left$(LTrim$(mLines(index)), 1) = "#"
+    End Function
+End Class

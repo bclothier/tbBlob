@@ -54,7 +54,8 @@ harness checks that claim against a real API; see `tests\harness-libgit2\COVERAG
 ## In the fixture but only compiled, not run
 
 - `tbf_visit_alias_cb` (a typedef of a callback typedef, D-024), and `tbf_unnamed_cb`,
-  `tbf_mixed_cb`, `tbf_macro_cb` (callback parameter names). They exist to check generation and
+  `tbf_mixed_cb`, `tbf_macro_cb`, `tbf_annotated_cb`, `tbf_type_only_cb` (callback parameter
+  names: unnamed, built by a macro, SAL-annotated, type names only). They exist to check generation and
   parameter-name recovery, which unit tests cover. They are never invoked.
 - Macros that must be skipped (`TBF_INIT`, `TBF_TWICE`, the `TBF_CYCLE_*` pair, `TBF_X86_ONLY`).
   The unit tests and the generated report check them; there is nothing to run.

@@ -253,7 +253,13 @@ TBF_API int tbf_foreach_point(tbf_visit_cb callback, void *context);
 typedef void (*tbf_unnamed_cb)(int, char *);          /* no names: arg1, arg2, nothing lost */
 typedef int (*tbf_mixed_cb)(int count, double);       /* count, arg2 */
 #define TBF_PARAM(type, name) type name
-typedef int (*tbf_macro_cb)(TBF_PARAM(int, first), TBF_PARAM(int, second)); /* cannot be parsed: reported */
+typedef int (*tbf_macro_cb)(TBF_PARAM(int, first), TBF_PARAM(int, second)); /* first, second: built by a macro */
+/* SAL annotations (sal.h, through stddef.h), one with a comma in its arguments (issue #1:
+ * webservices.h's WS_READ_CALLBACK): state, buffer, size, written. */
+typedef int (*tbf_annotated_cb)(_In_opt_ void *state, _Out_writes_bytes_to_(size, *written) void *buffer,
+    _In_ int size, _Out_ int *written);
+/* Only types, one a typedef and one a struct tag: arg1, arg2, arg3 (a type name is not a name). */
+typedef void (*tbf_type_only_cb)(const TBF_POINT *, struct TBF_CALLBACKS *, double);
 
 /** A stdcall export: a + b. On x86 it is exported decorated, as _tbf_std_add@8. */
 TBF_API int __stdcall tbf_std_add(int a, int b);

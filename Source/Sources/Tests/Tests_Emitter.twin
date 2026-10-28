@@ -97,6 +97,9 @@ Module Tests_Emitter
         Dim e As New Emitter
         e.Init t64, t86, macros, "tbfixture.dll", headers, "tbfixture"
         e.UseX86Macros macros86
+        Dim pp As New PreprocessedSource
+        pp.Load SelfTest.Fixture("tbfixture_x64.i")
+        e.UsePreprocessed pp
         Set e.X86Exports = x86Exports
         e.Generate
         Return e
@@ -162,6 +165,11 @@ Module Tests_Emitter
             "        ByVal code As Long, _" & vbCrLf & "        ByVal context As LongPtr _" & vbCrLf & "    )"
         HasLine t, "unnamed parameters", "    Public Delegate Sub tbf_unnamed_cb CDecl ( _" & vbCrLf & _
             "        ByVal arg1 As Long, _" & vbCrLf & "        ByVal arg2 As LongPtr _" & vbCrLf & "    )"
+        HasLine t, "SAL-annotated parameters (issue #1)", "    Public Delegate Function tbf_annotated_cb CDecl ( _" & vbCrLf & _
+            "        ByVal state As LongPtr, _" & vbCrLf & "        ByVal buffer As LongPtr, _" & vbCrLf & _
+            "        ByVal size As Long, _" & vbCrLf & "        ByRef written As Long _" & vbCrLf & "    ) As Long"
+        HasLine t, "parameters built by a macro (D-060)", "    Public Delegate Function tbf_macro_cb CDecl ( _" & vbCrLf & _
+            "        ByVal first As Long, _" & vbCrLf & "        ByVal second As Long _" & vbCrLf & "    ) As Long"
         HasLine t, "C comment", "    ' C: tbf_visit_cb = int (*)(const TBF_POINT *, void *)"
     End Sub
 
@@ -261,7 +269,8 @@ Module Tests_Emitter
         HasLine r, "functions", "- functions: 89"
         HasLine r, "rename", "- enumvalue TBF_OPEN -> TBF_OPEN_ (collides with function tbf_open)"
         HasLine r, "skipped macro", "- TBF_INIT: initializer"
-        SelfTest.AssertTrue "lost parameter names", InStr(r, vbCrLf & "- tbf_macro_cb: could not parse") > 0, r
+        SelfTest.AssertTrue "parameter names built by a macro are not lost (D-060)", InStr(r, vbCrLf & "- tbf_macro_cb:") = 0, r
+        SelfTest.AssertTrue "SAL-annotated parameter names are not lost (issue #1)", InStr(r, vbCrLf & "- tbf_annotated_cb:") = 0, r
         HasLine r, "by value", "- tbf_check_s4"
         HasLine r, "packing", "- TBF_PACKED1: [PackingAlignment(1)]"
         SelfTest.AssertTrue "over-aligned", InStr(r, vbCrLf & "- TBF_ALIGNED: over-aligned") > 0, r

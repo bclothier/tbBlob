@@ -1,6 +1,6 @@
 ' Finds castxml.exe and the MSVC environment, and runs the four CastXML passes (x86 XML, x64
-' XML, x86 and x64 macro dumps -- D-030) through .cmd scripts written to the work folder (D-017).
-' PRD req. 5-9.
+' XML, x86 and x64 macro dumps -- D-030; the x64 one also preprocesses the headers, D-060)
+' through .cmd scripts written to the work folder (D-017). PRD req. 5-9.
 Module CastXmlRunner
     ' The 0xC0000135 (STATUS_DLL_NOT_FOUND) exit code of a program Windows could not start.
     Public Const STATUS_DLL_NOT_FOUND As Long = &HC0000135
@@ -111,30 +111,36 @@ Module CastXmlRunner
 
     ' The .cmd script for one pass: calls vcvars, then castxml. macros = True gives the -E -dM
     ' macro dump; else the XML (--castxml-output=1). Paths are quoted; one -I per include folder
-    ' (the header folder first), one -D per define.
-    Public Function BuildScript(ByVal vcvars As String, ByVal castxml As String, ByVal headerFolder As String, includeDirs As Collection, defines As Collection, ByVal entryHeader As String, ByVal outPath As String, ByVal macros As Boolean) As String
-        Dim s As String, v As Variant
-        s = "@call " & Tools.Quote(vcvars) & " >nul 2>nul" & vbCrLf
-        s &= Tools.Quote(castxml) & " --castxml-cc-msvc-c cl"
-        If macros Then
-            ' -o goes with the other options below; -E -dM must come first.
-            s &= " -E -dM -o " & Tools.Quote(outPath)
-        Else
-            s &= " --castxml-output=1"
-        End If
-        s &= " -I " & Tools.Quote(headerFolder)
+    ' (the header folder first), one -D per define. With preprocessedPath, a macro pass also
+    ' writes the preprocessed headers there, in the same vcvars environment (D-060).
+    Public Function BuildScript(ByVal vcvars As String, ByVal castxml As String, ByVal headerFolder As String, includeDirs As Collection, defines As Collection, ByVal entryHeader As String, ByVal outPath As String, ByVal macros As Boolean, Optional ByVal preprocessedPath As String = "") As String
+        Dim flags As String, v As Variant
+        flags = " -I " & Tools.Quote(headerFolder)
         For Each v In includeDirs
-            s &= " -I " & Tools.Quote(v)
+            flags &= " -I " & Tools.Quote(v)
         Next
         For Each v In defines
-            s &= " -D " & Tools.Quote(v)
+            flags &= " -D " & Tools.Quote(v)
         Next
-        If Not macros Then s &= " -o " & Tools.Quote(outPath)
-        s &= " " & Tools.Quote(entryHeader) & vbCrLf
-        Return s
+        Dim cx As String = Tools.Quote(castxml) & " --castxml-cc-msvc-c cl"
+        Dim entry As String = " " & Tools.Quote(entryHeader)
+        Dim s As String = "@call " & Tools.Quote(vcvars) & " >nul 2>nul" & vbCrLf
+        If macros Then
+            ' -o goes with the other options; -E -dM must come first.
+            s &= cx & " -E -dM -o " & Tools.Quote(outPath) & flags & entry
+            If Len(preprocessedPath) > 0 Then
+                ' -std=c11: in its default C mode, castxml -E rejects the // comments on the SDK's
+                ' #if lines (sal.h). It defines no __STDC_VERSION__ (MSVC's C has none), so the
+                ' headers preprocess as in the other passes.
+                s &= " || exit /b 1" & vbCrLf & cx & " -E -std=c11 -o " & Tools.Quote(preprocessedPath) & flags & entry
+            End If
+        Else
+            s &= cx & " --castxml-output=1" & flags & " -o " & Tools.Quote(outPath) & entry
+        End If
+        Return s & vbCrLf
     End Function
 
-    ' Runs the four passes (XML and macro dump, x86 and x64, D-030) for o into workFolder (created if missing). vsPathOverride replaces
+    ' Runs the four passes (XML and macro dump, x86 and x64, D-030; the x64 macro pass also writes the preprocessed headers, D-060) for o into workFolder (created if missing). vsPathOverride replaces
     ' vswhere's answer (tests). ExitCode: 0 ok, 1 castxml failed, 4 castxml or MSVC not found.
     Public Function RunCastXml(o As CliOptions, ByVal workFolder As String, Optional ByVal vsPathOverride As String = "") As CastXmlResult
         Dim r As New CastXmlResult
@@ -186,20 +192,27 @@ Module CastXmlRunner
         r.Xml64Path = work & "\castxml_x64.xml"
         r.Macros86Path = work & "\macros_x86.txt"
         r.Macros64Path = work & "\macros_x64.txt"
+        r.Preprocessed64Path = work & "\preprocessed_x64.i"
         If Not RunPass(r, "x86", BuildScript(vc32, castxml, headerFolder, o.IncludeDirs, o.Defines, entry, r.Xml86Path, False), work, r.Xml86Path) Then Return r
         If Not RunPass(r, "x64", BuildScript(vc64, castxml, headerFolder, o.IncludeDirs, o.Defines, entry, r.Xml64Path, False), work, r.Xml64Path) Then Return r
         If Not RunPass(r, "macros_x86", BuildScript(vc32, castxml, headerFolder, o.IncludeDirs, o.Defines, entry, r.Macros86Path, True), work, r.Macros86Path) Then Return r
-        If Not RunPass(r, "macros_x64", BuildScript(vc64, castxml, headerFolder, o.IncludeDirs, o.Defines, entry, r.Macros64Path, True), work, r.Macros64Path) Then Return r
+        If Not RunPass(r, "macros_x64", BuildScript(vc64, castxml, headerFolder, o.IncludeDirs, o.Defines, entry, r.Macros64Path, True, r.Preprocessed64Path), work, r.Macros64Path, r.Preprocessed64Path) Then Return r
         Return r
     End Function
 
-    ' Writes and runs castxml_<name>.cmd; False (with r filled in) when castxml failed.
-    Private Function RunPass(r As CastXmlResult, ByVal name As String, ByVal script As String, ByVal work As String, ByVal outPath As String) As Boolean
+    ' Writes and runs castxml_<name>.cmd; False (with r filled in) when castxml failed or did not
+    ' write outPath (and outPath2, when given).
+    Private Function RunPass(r As CastXmlResult, ByVal name As String, ByVal script As String, ByVal work As String, ByVal outPath As String, Optional ByVal outPath2 As String = "") As Boolean
         Dim scriptPath As String = work & "\castxml_" & name & ".cmd"
         FileSys.WriteTextUtf8 scriptPath, script
         If FileSys.KindOf(outPath) = FileSys.KIND_FILE Then FileSys.RemovePath outPath
+        If Len(outPath2) > 0 Then
+            If FileSys.KindOf(outPath2) = FileSys.KIND_FILE Then FileSys.RemovePath outPath2
+        End If
         Dim code As Long = Tools.RunCommand(Tools.Quote(scriptPath))
-        If code = 0 And FileSys.KindOf(outPath) = FileSys.KIND_FILE Then Return True
+        Dim written As Boolean = FileSys.KindOf(outPath) = FileSys.KIND_FILE
+        If Len(outPath2) > 0 Then written = written And FileSys.KindOf(outPath2) = FileSys.KIND_FILE
+        If code = 0 And written Then Return True
         r.ExitCode = MainModule.EXIT_FAILED
         r.ErrorText = "castxml failed (" & name & " pass, exit " & code & "; script " & scriptPath & "):" & vbLf & Tools.LastToolOutput
         If Len(ExplainExit(code)) > 0 Then r.ErrorText &= vbLf & ExplainExit(code)

@@ -1,6 +1,7 @@
 ' Doc comments and other text recovered from the header source (PRD req. 27): CastXML records
 ' where a comment is (file + byte offsets) and where a declaration is (file + line) but not the
-' text. Also recovers function-type parameter names, which CastXML drops (D-019, task 8.1).
+' text. Also recovers function-type parameter names, which CastXML drops (D-019, task 8.1),
+' from the preprocessed headers (D-060).
 Module DocComments
     ' Why the last call returned less than asked (e.g. a header that cannot be read); "" if fine.
     Public LastProblem As String
@@ -144,41 +145,33 @@ Module DocComments
     End Function
 
     ' ---- parameter names ------------------------------------------------------------------
-
-    ' Removes /* ... */ and // ... comments from C text.
-    Private Function StripComments(ByVal s As String) As String
-        Dim r As String, e As Long
-        Dim i As Long = 1
-        Do While i <= Len(s)
-            If Mid$(s, i, 2) = "/*" Then
-                e = InStr(i + 2, s, "*/")
-                If e = 0 Then Exit Do
-                r &= " "
-                i = e + 2
-            ElseIf Mid$(s, i, 2) = "//" Then
-                e = InStr(i, s, vbLf)
-                If e = 0 Then Exit Do
-                i = e
-            Else
-                r &= Mid$(s, i, 1)
-                i += 1
-            End If
-        Loop
-        Return r
-    End Function
+    ' Read from the preprocessed headers (D-060), not the header files: there the compiler has
+    ' expanded every macro, so annotations (SAL's _In_, _Out_writes_bytes_to_(size, *count)) are
+    ' gone and a parameter built by a macro is plain C. Only C declarator syntax is left to read.
 
     Private Function IsCKeyword(ByVal w As String) As Boolean
         Select Case w
             Case "void", "char", "short", "int", "long", "float", "double", "signed", "unsigned", _
                  "const", "volatile", "struct", "union", "enum", "_Bool", "restrict", "__restrict", _
-                 "register", "__stdcall", "__cdecl", "__fastcall", "__thiscall", "__int64"
+                 "register", "__stdcall", "__cdecl", "__fastcall", "__thiscall", "__int64", _
+                 "__ptr32", "__ptr64", "__unaligned", "__sptr", "__uptr", "__w64"
                 Return True
         End Select
         Return False
     End Function
 
+    ' True when CastXML knows a type by this name: a typedef, or a struct, union or enum tag.
+    Private Function IsTypeName(m As CxModel, ByVal w As String) As Boolean
+        Dim tagName As Variant
+        For Each tagName In Array("Typedef", "Struct", "Union", "Enumeration")
+            If Not m.FindElement(tagName, w) Is Nothing Then Return True
+        Next
+        Return False
+    End Function
+
     ' The parameter's name, "" when it has none; raises nothing -- sets bad when it cannot tell.
-    Private Function NameOfParam(ByVal p As String, ByRef bad As Boolean) As String
+    ' p is preprocessed, so a "(" is a function-pointer declarator (or __declspec: bad).
+    Private Function NameOfParam(m As CxModel, ByVal p As String, ByRef bad As Boolean) As String
         p = Trim$(p)
         Dim br As Long = InStr(p, "[")
         If br > 0 Then p = RTrim$(Left$(p, br - 1))
@@ -199,9 +192,9 @@ Module DocComments
             bad = True
             Return ""
         End If
-        ' identifiers in order
+        ' identifiers in order; keywords say nothing about the name
         Dim words As New Collection
-        Dim j As Long
+        Dim j As Long, w As String, total As Long
         Dim i As Long = 1
         Do While i <= Len(p)
             If Mid$(p, i, 1) Like "[A-Za-z_]" Then
@@ -210,28 +203,32 @@ Module DocComments
                     If Not (Mid$(p, j, 1) Like "[A-Za-z0-9_]") Then Exit Do
                     j += 1
                 Loop
-                words.Add Mid$(p, i, j - i)
+                w = Mid$(p, i, j - i)
+                total += 1
+                If Not IsCKeyword(w) Then words.Add w
                 i = j
             Else
                 i += 1
             End If
         Loop
-        If words.Count < 2 Then Return ""
-        Dim lastWord As String = words(words.Count)
-        If IsCKeyword(lastWord) Then Return ""
-        Return lastWord
+        ' "ULONG" alone is a type, and so is the one other word of "const TBF_POINT *" when
+        ' CastXML knows it as one; in "int count" or "ULONG size" the last word is the name.
+        If total < 2 Or words.Count = 0 Then Return ""
+        If words.Count = 1 And IsTypeName(m, words(1)) Then Return ""
+        Return words(words.Count)
     End Function
 
     ' The C parameter names of the function type declared by el (a Typedef or a Field), read from
-    ' its declaration in the header. A parameter the header leaves unnamed becomes argN and is
-    ' not a loss. When the declaration cannot be parsed (e.g. a macro in the parameter list),
-    ' every name is argN and lostReason says why -- the only case the report treats as a loss.
-    Public Function ParamNamesFor(m As CxModel, ByVal el As MSXML2.IXMLDOMElement, ByVal paramCount As Long, ByRef lostReason As String) As Collection
+    ' its declaration in pp, the preprocessed headers (D-060). A parameter the header leaves
+    ' unnamed becomes argN and is not a loss. When the declaration cannot be read (no
+    ' preprocessed headers, or a declarator tbBlob cannot parse), every name is argN and
+    ' lostReason says why -- the only case the report treats as a loss.
+    Public Function ParamNamesFor(pp As PreprocessedSource, m As CxModel, ByVal el As MSXML2.IXMLDOMElement, ByVal paramCount As Long, ByRef lostReason As String) As Collection
         LastProblem = ""
         lostReason = ""
         Dim names As New Collection, i As Long
         Dim found() As String
-        Dim reason As String = ParseParamNames(m, el, paramCount, found)
+        Dim reason As String = ParseParamNames(pp, m, el, paramCount, found)
         If Len(reason) > 0 Then
             lostReason = reason
             For i = 1 To paramCount
@@ -246,33 +243,35 @@ Module DocComments
     End Function
 
     ' "" and found() filled, or why the declaration could not be parsed.
-    Private Function ParseParamNames(m As CxModel, ByVal el As MSXML2.IXMLDOMElement, ByVal paramCount As Long, found() As String) As String
-        Dim lines() As String
+    Private Function ParseParamNames(pp As PreprocessedSource, m As CxModel, ByVal el As MSXML2.IXMLDOMElement, ByVal paramCount As Long, found() As String) As String
         Dim path As String = m.FileOf(el)
-        If Not SourceLines(path, lines) Then Return "could not read " & path
         Dim lineNo As Long = CLng(Val(m.Attr(el, "line")))
-        If lineNo < 1 Or lineNo - 1 > UBound(lines) Then Return "could not find line " & lineNo & " of " & path
+        If pp Is Nothing Then Return "no preprocessed headers to read " & path & ":" & lineNo & " from"
+        Dim first As Long = pp.IndexOf(path, lineNo)
+        If first < 0 Then Return "could not find " & path & ":" & lineNo & " in the preprocessed headers"
 
-        ' the declaration: from its line up to the first ";" outside parentheses
+        ' the declaration: from its line up to the first ";" outside parentheses, skipping
+        ' directives (a line marker can fall inside a long declaration)
         Dim text As String, i As Long, k As Long, depth As Long, decl As String, done As Boolean
-        For i = lineNo - 1 To UBound(lines)
-            text &= lines(i) & vbLf
-            Dim clean As String = StripComments(text)
-            depth = 0
-            For k = 1 To Len(clean)
-                Select Case Mid$(clean, k, 1)
-                    Case "(": depth += 1
-                    Case ")": depth -= 1
-                    Case ";"
-                        If depth = 0 Then
-                            decl = Left$(clean, k - 1)
-                            done = True
-                            Exit For
-                        End If
-                End Select
-            Next
-            If done Then Exit For
-            If i - (lineNo - 1) > 60 Then Exit For
+        For i = first To pp.Count() - 1
+            If Not pp.IsDirective(i) Then
+                text &= pp.LineAt(i) & vbLf
+                depth = 0
+                For k = 1 To Len(text)
+                    Select Case Mid$(text, k, 1)
+                        Case "(": depth += 1
+                        Case ")": depth -= 1
+                        Case ";"
+                            If depth = 0 Then
+                                decl = Left$(text, k - 1)
+                                done = True
+                                Exit For
+                            End If
+                    End Select
+                Next
+                If done Then Exit For
+            End If
+            If i - first > 60 Then Exit For
         Next
         If Not done Then Return "could not find the end of the declaration at " & path & ":" & lineNo
 
@@ -320,7 +319,7 @@ Module DocComments
         ReDim found(0 To paramCount - 1)
         Dim bad As Boolean
         For k = 1 To paramCount
-            found(k - 1) = NameOfParam(params(k), bad)
+            found(k - 1) = NameOfParam(m, params(k), bad)
             If bad Then Return "could not parse parameter '" & Trim$(params(k)) & "' at " & path & ":" & lineNo & " (a macro or an unusual declarator)"
         Next
         Return ""

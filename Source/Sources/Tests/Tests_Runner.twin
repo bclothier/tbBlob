@@ -79,6 +79,15 @@ Module Tests_Runner
         SelfTest.AssertTrue "uses -E -dM -o", InStr(s, " -E -dM -o " & Q("C:\w\macros.txt") & " ") > 0, s
         SelfTest.AssertTrue "no --castxml-output", InStr(s, "--castxml-output") = 0, s
         SelfTest.AssertTrue "still emulates cl", InStr(s, "--castxml-cc-msvc-c cl") > 0, s
+        SelfTest.AssertTrue "no preprocessing without a path", InStr(s, "-std=c11") = 0, s
+        ' with a path, the same script also preprocesses the headers, after the dump succeeds (D-060)
+        s = CastXmlRunner.BuildScript("C:\vs\vcvars64.bat", "C:\cx\castxml.exe", "C:\h", _
+            New Collection, Coll("FOO=1"), "C:\h\a.h", "C:\w\macros.txt", True, "C:\w\pp.i")
+        Dim cx As String = Q("C:\cx\castxml.exe") & " --castxml-cc-msvc-c cl"
+        Dim want As String = "@call " & Q("C:\vs\vcvars64.bat") & " >nul 2>nul" & vbCrLf & _
+            cx & " -E -dM -o " & Q("C:\w\macros.txt") & " -I " & Q("C:\h") & " -D " & Q("FOO=1") & " " & Q("C:\h\a.h") & " || exit /b 1" & vbCrLf & _
+            cx & " -E -std=c11 -o " & Q("C:\w\pp.i") & " -I " & Q("C:\h") & " -D " & Q("FOO=1") & " " & Q("C:\h\a.h") & vbCrLf
+        SelfTest.AssertEq "script with preprocessing", s, want
     End Sub
 
     Private Sub LookupOrder()
@@ -154,12 +163,13 @@ Module Tests_Runner
         Dim t As String = SelfTest.NewTempFolder()
         Dim work As String = t & "\work folder"
         Dim r As CastXmlResult = CastXmlRunner.RunCastXml(o, work)
-        Dim x86 As String, x64 As String, macros As String, macros86 As String, scripts As Long
+        Dim x86 As String, x64 As String, macros As String, macros86 As String, pre As String, scripts As Long
         If r.ExitCode = 0 Then
             x86 = FileSys.ReadTextUtf8(r.Xml86Path)
             x64 = FileSys.ReadTextUtf8(r.Xml64Path)
             macros86 = FileSys.ReadTextUtf8(r.Macros86Path)
             macros = FileSys.ReadTextUtf8(r.Macros64Path)
+            pre = FileSys.ReadTextUtf8(r.Preprocessed64Path)
         End If
         If FileSys.KindOf(work & "\castxml_x86.cmd") = FileSys.KIND_FILE Then scripts += 1
         If FileSys.KindOf(work & "\castxml_x64.cmd") = FileSys.KIND_FILE Then scripts += 1
@@ -176,6 +186,8 @@ Module Tests_Runner
         SelfTest.AssertTrue "macro dump has TBF_VERSION_MAJOR", InStr(macros, "#define TBF_VERSION_MAJOR 1") > 0, "length " & Len(macros)
         SelfTest.AssertTrue "x64 macro dump is the x64 compiler's (D-030)", InStr(macros, "#define TBF_ARCH_BITS 64") > 0, "length " & Len(macros)
         SelfTest.AssertTrue "x86 macro dump is the x86 compiler's (D-030)", InStr(macros86, "#define TBF_ARCH_BITS 32") > 0, "length " & Len(macros86)
+        SelfTest.AssertTrue "preprocessed headers: SAL expanded away (D-060)", InStr(pre, "typedef int (*tbf_annotated_cb)(") > 0 And InStr(pre, "_Out_writes_bytes_to_") = 0, "length " & Len(pre)
+        SelfTest.AssertTrue "preprocessed headers: macro-built parameters expanded", InStr(pre, "typedef int (*tbf_macro_cb)(int first, int second);") > 0, "length " & Len(pre)
         SelfTest.AssertEq "scripts kept in the work folder", scripts, 4
         SelfTest.AssertTrue "without --also the scripts compile the entry header itself", direct
     End Sub
