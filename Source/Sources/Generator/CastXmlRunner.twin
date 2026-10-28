@@ -110,32 +110,33 @@ Module CastXmlRunner
     End Function
 
     ' The .cmd script for one pass: calls vcvars, then castxml. macros = True gives the -E -dM
-    ' macro dump; else the XML (--castxml-output=1). Paths are quoted; one -I per include folder
+    ' macro dump; else the XML (--castxml-output=1). castxml's arguments are quoted by the C
+    ' runtime's rules (QuoteArg, D-056), the vcvars call by cmd's; one -I per include folder
     ' (the header folder first), one -D per define. With preprocessedPath, a macro pass also
     ' writes the preprocessed headers there, in the same vcvars environment (D-060).
     Public Function BuildScript(ByVal vcvars As String, ByVal castxml As String, ByVal headerFolder As String, includeDirs As Collection, defines As Collection, ByVal entryHeader As String, ByVal outPath As String, ByVal macros As Boolean, Optional ByVal preprocessedPath As String = "") As String
         Dim flags As String, v As Variant
-        flags = " -I " & Tools.Quote(headerFolder)
+        flags = " -I " & Tools.QuoteArg(headerFolder)
         For Each v In includeDirs
-            flags &= " -I " & Tools.Quote(v)
+            flags &= " -I " & Tools.QuoteArg(v)
         Next
         For Each v In defines
-            flags &= " -D " & Tools.Quote(v)
+            flags &= " -D " & Tools.QuoteArg(v)
         Next
-        Dim cx As String = Tools.Quote(castxml) & " --castxml-cc-msvc-c cl"
-        Dim entry As String = " " & Tools.Quote(entryHeader)
+        Dim cx As String = Tools.QuoteArg(castxml) & " --castxml-cc-msvc-c cl"
+        Dim entry As String = " " & Tools.QuoteArg(entryHeader)
         Dim s As String = "@call " & Tools.Quote(vcvars) & " >nul 2>nul" & vbCrLf
         If macros Then
             ' -o goes with the other options; -E -dM must come first.
-            s &= cx & " -E -dM -o " & Tools.Quote(outPath) & flags & entry
+            s &= cx & " -E -dM -o " & Tools.QuoteArg(outPath) & flags & entry
             If Len(preprocessedPath) > 0 Then
                 ' -std=c11: in its default C mode, castxml -E rejects the // comments on the SDK's
                 ' #if lines (sal.h). It defines no __STDC_VERSION__ (MSVC's C has none), so the
                 ' headers preprocess as in the other passes.
-                s &= " || exit /b 1" & vbCrLf & cx & " -E -std=c11 -o " & Tools.Quote(preprocessedPath) & flags & entry
+                s &= " || exit /b 1" & vbCrLf & cx & " -E -std=c11 -o " & Tools.QuoteArg(preprocessedPath) & flags & entry
             End If
         Else
-            s &= cx & " --castxml-output=1" & flags & " -o " & Tools.Quote(outPath) & entry
+            s &= cx & " --castxml-output=1" & flags & " -o " & Tools.QuoteArg(outPath) & entry
         End If
         Return s & vbCrLf
     End Function

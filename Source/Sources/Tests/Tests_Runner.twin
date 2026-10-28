@@ -14,6 +14,9 @@ Module Tests_Runner
         SelfTest.Add "castxml: a header with a syntax error fails with castxml's error text", MODULE_ID, 8, True
         SelfTest.Add "runner: with --also, a generated entry file includes the entry header then each extra header (D-033)", MODULE_ID, 9
         SelfTest.Add "castxml: with --also, all passes compile tbblob_entry.h and see the extra header (D-033)", MODULE_ID, 10, True
+        SelfTest.Add "runner: QuoteArg doubles backslashes before a quote and escapes quotes, by the C runtime's rules (D-056)", MODULE_ID, 11
+        SelfTest.Add "runner: scripts quote -I, -D, -o, castxml and the entry header with QuoteArg; vcvars keeps cmd quoting (D-056)", MODULE_ID, 12
+        SelfTest.Add "castxml: a header folder and an -I folder ending in a backslash work (D-056)", MODULE_ID, 13, True
     End Sub
 
     Public Sub RunTest(ByVal index As Long)
@@ -28,6 +31,9 @@ Module Tests_Runner
             Case 8: BrokenHeaderFails
             Case 9: EntryFile
             Case 10: AlsoRun
+            Case 11: QuoteArgRules
+            Case 12: ScriptArgQuoting
+            Case 13: TrailingBackslashRun
             Case Else: Err.Raise SelfTest.CHECK_FAILED, , "no test " & index & " in Tests_Runner"
         End Select
     End Sub
@@ -192,6 +198,34 @@ Module Tests_Runner
         SelfTest.AssertTrue "without --also the scripts compile the entry header itself", direct
     End Sub
 
+    Private Sub QuoteArgRules()
+        SelfTest.AssertEq "plain", Tools.QuoteArg("C:\inc"), Q("C:\inc")
+        SelfTest.AssertEq "inner backslashes untouched", Tools.QuoteArg("C:\a b\c"), Q("C:\a b\c")
+        SelfTest.AssertEq "trailing backslash doubled", Tools.QuoteArg("C:\inc\"), Q("C:\inc\\")
+        SelfTest.AssertEq "drive root", Tools.QuoteArg("C:\"), Q("C:\\")
+        SelfTest.AssertEq "two trailing backslashes", Tools.QuoteArg("C:\a\\"), Q("C:\a\\\\")
+        SelfTest.AssertEq "embedded quote", Tools.QuoteArg("a""b"), Q("a\""b")
+        SelfTest.AssertEq "backslash before a quote", Tools.QuoteArg("a\""b"), Q("a\\\""b")
+        SelfTest.AssertEq "empty", Tools.QuoteArg(""), """"""
+    End Sub
+
+    ' How often part occurs in s.
+    Private Function Occurrences(ByVal s As String, ByVal part As String) As Long
+        Return (Len(s) - Len(Replace(s, part, ""))) \ Len(part)
+    End Function
+
+    Private Sub ScriptArgQuoting()
+        Dim s As String = CastXmlRunner.BuildScript("C:\VS\vcvars64.bat", "C:\cx\castxml.exe", "C:\h\", _
+            Coll("D:\"), Coll("ROOT=C:\p\"), "C:\h\a.h", "C:\w\macros.txt", True, "C:\w\pp.i")
+        SelfTest.AssertTrue "vcvars keeps cmd quoting", Left$(s, Len("@call " & Q("C:\VS\vcvars64.bat") & " ")) = "@call " & Q("C:\VS\vcvars64.bat") & " ", s
+        SelfTest.AssertEq "header folder, on both castxml lines", Occurrences(s, " -I " & Q("C:\h\\") & " "), 2
+        SelfTest.AssertEq "drive root -I, on both lines", Occurrences(s, " -I " & Q("D:\\") & " "), 2
+        SelfTest.AssertEq "define value, on both lines", Occurrences(s, " -D " & Q("ROOT=C:\p\\") & " "), 2
+        Dim x As String = CastXmlRunner.BuildScript("C:\VS\vcvars32.bat", "C:\cx\castxml.exe", "C:\h\", _
+            New Collection, New Collection, "C:\h\a.h", "C:\w\a_x86.xml", False)
+        SelfTest.AssertTrue "XML script too", InStr(x, " --castxml-output=1 -I " & Q("C:\h\\") & " -o " & Q("C:\w\a_x86.xml") & " " & Q("C:\h\a.h") & vbCrLf) > 0, x
+    End Sub
+
     Private Sub EntryFile()
         Dim extra As New Collection
         extra.Add "C:\h\sys\x.h"
@@ -218,6 +252,25 @@ Module Tests_Runner
         SelfTest.AssertTrue "entry file includes the extra header", InStr(entry, "tbfixture_sys.h""") > 0, entry
         SelfTest.AssertTrue "scripts compile the entry file", InStr(script, "tbblob_entry.h""") > 0, script
         SelfTest.AssertTrue "the XML sees the extra header's function", InStr(x86, "name=""tbf_sys_answer""") > 0, "length " & Len(x86)
+    End Sub
+
+    Private Sub TrailingBackslashRun()
+        Dim o As New CliOptions
+        o.HeaderFolder = RepoRoot() & "\tests\fixture-c\"
+        o.EntryHeader = "tbfixture.h"
+        o.IncludeDirs.Add RepoRoot() & "\tests\fixture-c\"
+        o.CastXmlPath = RepoCastXml()
+        Dim t As String = SelfTest.NewTempFolder()
+        Dim r As CastXmlResult = CastXmlRunner.RunCastXml(o, t & "\work")
+        Dim x64 As String, pre As String
+        If r.ExitCode = 0 Then
+            x64 = FileSys.ReadTextUtf8(r.Xml64Path)
+            pre = FileSys.ReadTextUtf8(r.Preprocessed64Path)
+        End If
+        FileSys.RemovePath t
+        SelfTest.AssertTrue "exit code 0", r.ExitCode = 0, "exit " & r.ExitCode & ": " & r.ErrorText
+        SelfTest.AssertTrue "x64 XML has the fixture's functions", InStr(x64, "name=""tbf_ret_char""") > 0, "length " & Len(x64)
+        SelfTest.AssertTrue "the preprocess line ran too (D-060)", InStr(pre, "tbf_ret_char") > 0, "length " & Len(pre)
     End Sub
 
     Private Sub BrokenHeaderFails()

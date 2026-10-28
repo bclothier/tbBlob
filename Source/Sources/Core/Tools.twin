@@ -46,10 +46,33 @@ Module Tools
     ' Packs folder into project with tBImportExport_win64.exe import ... --overwrite.
     ' Returns the tool's exit code (0 done, 6 done with a warning, else failed).
     Public Function RunImportTool(ByVal project As String, ByVal folder As String) As Long
-        Return RunCommand(Quote(ImportToolPath()) & " import " & Quote(FileSys.FullPath(project)) & " " & Quote(FileSys.FullPath(folder)) & " --overwrite")
+        Return RunCommand(QuoteArg(ImportToolPath()) & " import " & QuoteArg(FileSys.FullPath(project)) & " " & QuoteArg(FileSys.FullPath(folder)) & " --overwrite")
     End Function
 
+    ' s in double quotes, for cmd (its own parsing: no escapes). For an argument of a program,
+    ' use QuoteArg.
     Public Function Quote(ByVal s As String) As String
         Return """" & s & """"
+    End Function
+
+    ' s in double quotes for a program that reads its command line by the Microsoft C runtime's
+    ' rules (D-056): backslashes are literal except directly before a quote, where 2n of them
+    ' read as n, and \" is a literal quote. So each run of backslashes before an embedded quote
+    ' or the closing one is doubled, and an embedded quote becomes \". "C:\inc\" -> "C:\inc\\".
+    Public Function QuoteArg(ByVal s As String) As String
+        Dim r As String, c As String, i As Long, n As Long
+        For i = 1 To Len(s)
+            c = Mid$(s, i, 1)
+            If c = "\" Then
+                n += 1
+            ElseIf c = """" Then
+                r &= String$(2 * n + 1, "\") & """"
+                n = 0
+            Else
+                r &= String$(n, "\") & c
+                n = 0
+            End If
+        Next
+        Return """" & r & String$(2 * n, "\") & """"
     End Function
 End Module
