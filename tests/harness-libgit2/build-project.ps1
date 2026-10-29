@@ -1,7 +1,8 @@
 # Builds the libgit2 runtime harness project (task 12):
 #   1. runs tbBlob on libgit2's git2.h plus every git2/sys/*.h (x64 vcpkg include folder) into
 #      tests\harness-libgit2\bindings\,
-#      reading the x86 git2.dll's exports (--x86-dll, D-026)
+#      from the x64 and x86 bin folders: functions bind by git2.dll's export tables (D-053) and the
+#      x86 exports decide __stdcall names (--x86-dll, D-026)
 #   2. assembles tests\harness-libgit2\project\ = Settings + Sources\ (harness) + Results.twin and
 #      Utf8.twin shared from tests\harness-fixture\Sources + bindings\Source\*.twin
 #   3. imports it into tests\harness-libgit2\harness_libgit2.twinproj with tBImportExport
@@ -18,7 +19,9 @@ $tbBlob = "$root\Build\tbBlob_win64.exe"
 $castxml = "$root\CastXML\vcpkg_installed\x64-windows\tools\castxml\bin\castxml.exe"
 $tool = "$root\tools\impexp\Build\tBImportExport_win64.exe"
 $include = "$root\libgit2\vcpkg_installed\x64-windows\include"
-$x86dll = "$root\libgit2\vcpkg_installed_x86\x86-windows\bin\git2.dll"
+# The DLL folders (D-053): functions bind by git2.dll's export tables; pcre/zlib export none of them.
+$bin64 = "$root\libgit2\vcpkg_installed\x64-windows\bin"
+$bin86 = "$root\libgit2\vcpkg_installed_x86\x86-windows\bin"
 
 # 1. Bindings: generated fresh, then copied over the old ones only where changed (harness-sync.ps1)
 . "$root\tests\harness-sync.ps1"
@@ -26,7 +29,7 @@ $new = if ($BindingsOnly) { $BindingsOnly } else { "$here\bindings.new" }
 if (Test-Path $new) { Remove-Item -Recurse -Force $new }
 # git2.h plus every git2/sys/*.h (D-033); sys/stream.h needs ssize_t, which MSVC lacks (D-032)
 $also = @(Get-ChildItem "$include\git2\sys\*.h" | Sort-Object Name | ForEach-Object { "--also"; "git2\sys\$($_.Name)" })
-& $tbBlob $include git2.h git2.dll $new --castxml $castxml --x86-dll $x86dll -D ssize_t=intptr_t @also
+& $tbBlob $include git2.h $bin64 $new --castxml $castxml --x86-dll $bin86 -D ssize_t=intptr_t @also
 if ($LASTEXITCODE -ne 0) { Write-Host "FAILED: tbBlob exit $LASTEXITCODE"; exit 1 }
 if ($BindingsOnly) { exit 0 }
 $changed = Sync-Bindings $new "$here\bindings"

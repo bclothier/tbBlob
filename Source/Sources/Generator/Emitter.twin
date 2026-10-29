@@ -8,9 +8,6 @@ Class Emitter
     Public CurrentItem As String
     ' TEST HOOK: raise a forced error when emitting the item with this C name ("" = never).
     Public FailOn As String
-    ' The x86 DLL's export names (PeExports.ExportNames, from --x86-dll), or Nothing when not
-    ' given; decides how x86 __stdcall functions are bound (D-026). Set before Generate.
-    Public X86Exports As Collection
     ' Why Generate failed, captured inside the class with CurrentItem (D-019: an error's text can
     ' be lost on its way out of a class method); "" when it did not fail.
     Public ErrorText As String
@@ -23,7 +20,7 @@ Class Emitter
     Private mMacros As MacroTable
     Private mMacros86 As MacroTable     ' Nothing: constants from the x64 dump only
     Private mPre As PreprocessedSource  ' Nothing: callback parameter names are reported lost
-    Private mDll As String
+    Private mDlls As DllSet             ' which DLL each function binds to, and x86 exports (D-053)
     Private mHeaderFolder As String
     Private mProject As String
 
@@ -40,14 +37,15 @@ Class Emitter
     Private mCounts As Collection   ' counter name -> ValueBox holding a Long (updated in place, D-040)
 
     ' map64/map86: the two architectures' mappers; macros: parsed + scanned (enum values are
-    ' added here); projectName names the layout-check module.
-    Public Sub Init(map64 As TypeMapper, map86 As TypeMapper, macros As MacroTable, ByVal dllName As String, ByVal headerFolder As String, ByVal projectName As String)
+    ' added here); dlls: which DLL each function binds to (D-053), and the x86 export names that
+    ' decide how x86 __stdcall functions are bound (D-026); projectName names the layout-check module.
+    Public Sub Init(map64 As TypeMapper, map86 As TypeMapper, macros As MacroTable, dlls As DllSet, ByVal headerFolder As String, ByVal projectName As String)
         Set mMap64 = map64
         Set mMap86 = map86
         Set mM64 = map64.Model
         Set mM86 = map86.Model
         Set mMacros = macros
-        mDll = dllName
+        Set mDlls = dlls
         mHeaderFolder = FileSys.FullPath(headerFolder)
         mProject = projectName
         mMacros.AddEnumValues mM64
@@ -198,7 +196,7 @@ Class Emitter
         Set mTbLayout = New Collection
         Set mTbLayoutCases = New Collection
         mSections = Array("Renamed", "Type aliases", "Skipped macros", "Parameter names lost", "Structs passed or returned by value", _
-            "Variadic functions", "stdcall functions", "Declared but not exported", "Architecture-dependent constants", "Packing", "Unions", "Bitfields", "Mapping notes", "x86/x64 disagreements")
+            "Variadic functions", "stdcall functions", "Declared but not exported", "Exported but not declared", "Architecture-dependent constants", "Packing", "Unions", "Bitfields", "Mapping notes", "x86/x64 disagreements")
         Dim s As Variant
         For Each s In mSections
             mReport.Add New Collection, s
@@ -217,12 +215,27 @@ Class Emitter
             EmitType r
         Next
         Dim f As MSXML2.IXMLDOMElement
+        ' bind every function first, so --keep-unexported knows each header's DLL whatever the order (D-062)
+        For Each f In mM64.Functions()
+            mDlls.DllFor mM64.Attr(f, "name"), mM64.FileOf(f)
+        Next
         For Each f In mM64.Functions()
             EmitDeclare f
         Next
 
         CurrentItem = "the report"
         Dim line As Variant
+        ' exports of a bound DLL that no library header declares: a header left out, or C++-only
+        Dim declared As New Collection, d As Variant
+        declared.KeyCompareMode = vbBinaryCompare
+        For Each f In mM64.Functions()
+            If Not declared.Exists(mM64.Attr(f, "name")) Then declared.Add True, mM64.Attr(f, "name")
+        Next
+        For Each d In mDlls.DllNames()
+            For Each line In mDlls.ExportedNotDeclared(d, declared)
+                Rep "Exported but not declared", d & ": " & line
+            Next
+        Next
         For Each line In mNames.RenameLog()
             Rep "Renamed", line
         Next
@@ -620,20 +633,20 @@ Class Emitter
         Return If(Len(alias) > 0, " Alias """ & alias & """", "")
     End Function
 
-    ' The export name to bind an x86 __stdcall function to (D-026): its plain name when the x86 DLL
-    ' exports that (or when X86Exports is Nothing: not checked), "_name@N" when only that is
-    ' exported. Each case is reported.
-    Private Function StdcallAlias86(ByVal cname As String, ByVal f86 As MSXML2.IXMLDOMElement, ByVal alias As String) As String
+    ' The export name to bind an x86 __stdcall function to (D-026): its plain name when its x86 DLL
+    ' exports that (or when x86 is Nothing: not checked), "_name@N" when only that is exported.
+    ' Each case is reported.
+    Private Function StdcallAlias86(ByVal cname As String, ByVal f86 As MSXML2.IXMLDOMElement, ByVal alias As String, x86 As Collection) As String
         Dim decorated As String = "_" & cname & "@" & StdcallArgBytes86(f86)
-        If X86Exports Is Nothing Then
+        If x86 Is Nothing Then
             Rep "stdcall functions", cname & ": stdcall; x86 export name not checked: generate with --x86-dll <x86 DLL> to bind it if it is exported as " & decorated & " (D-026)"
             Return alias
         End If
-        If X86Exports.Exists(cname) Then
+        If x86.Exists(cname) Then
             Rep "stdcall functions", cname & ": stdcall; exported undecorated on x86"
             Return alias
         End If
-        If X86Exports.Exists(decorated) Then
+        If x86.Exists(decorated) Then
             Rep "stdcall functions", cname & ": stdcall; bound on x86 as " & decorated & " (D-026)"
             Return decorated
         End If
@@ -667,6 +680,17 @@ Class Emitter
     Private Sub EmitDeclare(ByVal f As MSXML2.IXMLDOMElement)
         Dim cname As String = mM64.Attr(f, "name")
         SetItem "function", cname, f
+        ' D-053: bound to the DLL that exports it; a function no DLL exports cannot be called
+        Dim dll As String = mDlls.DllFor(cname, mM64.FileOf(f))
+        If Len(dll) = 0 And mDlls.KeepUnexported Then dll = mDlls.FallbackFor(cname, mM64.FileOf(f))
+        If Len(dll) = 0 Then
+            Rep "Declared but not exported", cname & ": exported by no DLL; no declare generated" & _
+                If(mDlls.KeepUnexported, " (--keep-unexported: no DLL to bind it to; name one with --dll " & cname & "=<dll file name>)", "")
+            Exit Sub
+        End If
+        ' D-062: bound to a DLL that does not export it, because --dll or --keep-unexported said so
+        Dim unexported As Boolean = Not mDlls.Exports(dll, cname)
+        Dim x86 As Collection = mDlls.X86Exports(dll)
         Dim m As String = ModuleFor(mM64.FileOf(f))
         Dim f86 As MSXML2.IXMLDOMElement = mMap86.FindFunction(cname)
         Dim cc As String = If(f86 Is Nothing, "CDecl", mMap86.CallConvOf(f86))
@@ -688,16 +712,21 @@ Class Emitter
             Add m, "' NOTE: passes or returns a struct by value; tB support is verified by the tbfixture harness (task 11)."
             Rep "Structs passed or returned by value", cname
         End If
+        If unexported Then
+            Dim why As String = If(mDlls.Overridden(cname, mM64.FileOf(f)), "--dll", "--keep-unexported")
+            Add m, "' NOTE: not exported by " & dll & " (declared because of " & why & "): a call fails at run time unless the DLL loaded then exports it"
+            Rep "Declared but not exported", cname & ": not exported by " & dll & "; declared anyway (" & why & ")"
+        End If
         Dim alias As String = mNames.FunctionAlias(cname)
         Dim alias86 As String = alias
-        If Len(cc) = 0 Then alias86 = StdcallAlias86(cname, f86, alias)
+        If Len(cc) = 0 Then alias86 = StdcallAlias86(cname, f86, alias, x86)
         Dim head As String = "Public DeclareWide PtrSafe " & If(Len(ret) = 0, "Sub", "Function") & " " & mNames.TbName(cname, "function") & _
-            If(Len(cc) > 0, " " & cc, "") & " Lib """ & mDll & """"
+            If(Len(cc) > 0, " " & cc, "") & " Lib """ & dll & """"
         Dim tail As String = If(Len(ret) > 0, " As " & ret, "")
         ' D-031: a header function the x86 DLL exports under no name would fail when called
-        If Not X86Exports Is Nothing And alias86 = alias Then
-            If Not X86Exports.Exists(cname) Then
-                Add m, "' NOTE: not exported by " & mDll & " (x86): a call fails at run time"
+        If Not x86 Is Nothing And alias86 = alias And Not unexported Then
+            If Not x86.Exists(cname) Then
+                Add m, "' NOTE: not exported by " & dll & " (x86): a call fails at run time"
                 If Len(cc) > 0 Then Rep "Declared but not exported", cname & ": not exported by the x86 DLL; a call fails at run time"
             End If
         End If
@@ -712,6 +741,7 @@ Class Emitter
         End If
         Add m, ""
         Tally "functions"
+        Tally "dll:" & LCase$(dll)
     End Sub
 
     ' ---- output -----------------------------------------------------------------------------
@@ -840,42 +870,138 @@ Class Emitter
     End Function
 
     ' The optional loader module (D-027): <projectName>_Loader with Load(folder), LoadFile(path)
-    ' and IsLoaded(). Nothing calls it; the consumer decides.
+    ' and IsLoaded(). Nothing calls it; the consumer decides. One DLL gives the D-027 text; a
+    ' project bound to several DLLs gets a loader for all of them (D-053).
     Public Function LoaderModuleName() As String
         Return mProject & "_Loader"
     End Function
 
     Public Function LoaderModuleText() As String
+        Dim names As Collection = mDlls.DllNames()
+        If names.Count <> 1 Then Return MultiLoaderModuleText(names)
+        Dim dll As String = names(1)
         Dim lines As New Collection
-        lines.Add "' GENERATED by tbBlob: optional loader for " & mDll & " (D-027). Do not edit."
-        lines.Add "' Calling it is optional. Without it, the declares bind to " & mDll & " on the first call through"
+        lines.Add "' GENERATED by tbBlob: optional loader for " & dll & " (D-027). Do not edit."
+        lines.Add "' Calling it is optional. Without it, the declares bind to " & dll & " on the first call through"
         lines.Add "' the Windows DLL search order: the process's EXE folder, the system folders, the current"
         lines.Add "' folder, then PATH -- never subfolders. Call Load or LoadFile before the first call to use a"
-        lines.Add "' DLL from elsewhere; every Lib """ & mDll & """ declare then binds to the module already loaded."
+        lines.Add "' DLL from elsewhere; every Lib """ & dll & """ declare then binds to the module already loaded."
+        AddLoaderHead lines, "    ' The DLL's own dependencies are looked for in its folder first."
+        lines.Add "    Private Const DLL_NAME As String = """ & dll & """"
+        AddArchDir lines
+        lines.Add ""
+        lines.Add "    ' Loads folder\win32\" & dll & " or folder\win64\" & dll & " (matching the running code) when"
+        lines.Add "    ' that file exists, else folder\" & dll & ". Returns the module handle. Raises an error naming"
+        lines.Add "    ' every path tried when it cannot load; an architecture file that exists but fails to load is"
+        lines.Add "    ' not passed over for folder\" & dll & " (that could be the other architecture's DLL)."
+        lines.Add "    Public Function Load(ByVal folder As String) As LongPtr"
+        AddLoadBody lines, "DLL_NAME"
+        lines.Add "    End Function"
+        lines.Add ""
+        lines.Add "    ' Loads " & dll & " from one full path. Returns the module handle; raises an error naming"
+        lines.Add "    ' the path when it cannot load."
+        lines.Add "    Public Function LoadFile(ByVal path As String) As LongPtr"
+        lines.Add "        Dim h As LongPtr = LoadLibraryExW(StrPtr(path), 0, LOAD_WITH_ALTERED_SEARCH_PATH)"
+        lines.Add "        If h = 0 Then Err.Raise LOAD_FAILED, , ""cannot load "" & DLL_NAME & "": tried "" & path & "" (Windows error "" & Err.LastDllError & "")"""
+        lines.Add "        Return h"
+        lines.Add "    End Function"
+        lines.Add ""
+        lines.Add "    ' True when a module named " & dll & " is loaded in this process."
+        lines.Add "    Public Function IsLoaded() As Boolean"
+        lines.Add "        Return GetModuleHandleW(StrPtr(DLL_NAME)) <> 0"
+        lines.Add "    End Function"
+        lines.Add "End Module"
+        Return JoinLines(lines)
+    End Function
+
+    ' The loader of a project bound to several DLLs (D-053): Load(folder) loads every one, in the
+    ' order functions first bind to them.
+    Private Function MultiLoaderModuleText(names As Collection) As String
+        Dim lines As New Collection, n As Variant, list As String, quoted As String
+        For Each n In names
+            list &= If(Len(list) > 0, ", ", "") & n
+            quoted &= If(Len(quoted) > 0, ", ", "") & """" & n & """"
+        Next
+        lines.Add "' GENERATED by tbBlob: optional loader for " & list & " (D-027, D-053). Do not edit."
+        lines.Add "' Calling it is optional. Without it, each declare binds to its DLL on the first call through"
+        lines.Add "' the Windows DLL search order: the process's EXE folder, the system folders, the current"
+        lines.Add "' folder, then PATH -- never subfolders. Call Load or LoadFile before the first call to use"
+        lines.Add "' DLLs from elsewhere; every declare then binds to the module already loaded."
+        AddLoaderHead lines, "    ' A DLL's own dependencies are looked for in its folder first."
+        AddArchDir lines
+        lines.Add ""
+        lines.Add "    ' The DLLs the declares bind to, in the order Load loads them."
+        lines.Add "    Private Function DllNames() As Variant"
+        lines.Add "        Return Array(" & quoted & ")"
+        lines.Add "    End Function"
+        lines.Add ""
+        lines.Add "    ' Loads every DLL (" & list & "), each from folder\win32\ or folder\win64\"
+        lines.Add "    ' (matching the running code) when the file is there, else from folder\. Returns the first"
+        lines.Add "    ' DLL's module handle. Raises an error naming the DLL and every path tried when one cannot"
+        lines.Add "    ' load; an architecture file that exists but fails to load is not passed over."
+        lines.Add "    Public Function Load(ByVal folder As String) As LongPtr"
+        lines.Add "        Dim i As Long, h As LongPtr, first As LongPtr"
+        lines.Add "        Dim names As Variant = DllNames()"
+        lines.Add "        For i = LBound(names) To UBound(names)"
+        lines.Add "            h = LoadOne(folder, names(i))"
+        lines.Add "            If first = 0 Then first = h"
+        lines.Add "        Next"
+        lines.Add "        Return first"
+        lines.Add "    End Function"
+        lines.Add ""
+        lines.Add "    Private Function LoadOne(ByVal folder As String, ByVal dllName As String) As LongPtr"
+        AddLoadBody lines, "dllName"
+        lines.Add "    End Function"
+        lines.Add ""
+        lines.Add "    ' Loads one DLL from a full path; call it once per DLL. Returns the module handle; raises an"
+        lines.Add "    ' error naming the path when it cannot load."
+        lines.Add "    Public Function LoadFile(ByVal path As String) As LongPtr"
+        lines.Add "        Dim h As LongPtr = LoadLibraryExW(StrPtr(path), 0, LOAD_WITH_ALTERED_SEARCH_PATH)"
+        lines.Add "        If h = 0 Then Err.Raise LOAD_FAILED, , ""cannot load "" & path & "" (Windows error "" & Err.LastDllError & "")"""
+        lines.Add "        Return h"
+        lines.Add "    End Function"
+        lines.Add ""
+        lines.Add "    ' True when every DLL (" & list & ") is loaded in this process."
+        lines.Add "    Public Function IsLoaded() As Boolean"
+        lines.Add "        Dim i As Long, n As String"
+        lines.Add "        Dim names As Variant = DllNames()"
+        lines.Add "        For i = LBound(names) To UBound(names)"
+        lines.Add "            n = names(i)"
+        lines.Add "            If GetModuleHandleW(StrPtr(n)) = 0 Then Return False"
+        lines.Add "        Next"
+        lines.Add "        Return True"
+        lines.Add "    End Function"
+        lines.Add "End Module"
+        Return JoinLines(lines)
+    End Function
+
+    ' Module line, the kernel32 declares and the constants every loader has.
+    Private Sub AddLoaderHead(lines As Collection, ByVal dependencyComment As String)
         lines.Add "Module " & LoaderModuleName()
         lines.Add "    Private Declare PtrSafe Function LoadLibraryExW Lib ""kernel32"" (ByVal lpLibFileName As LongPtr, ByVal hFile As LongPtr, ByVal dwFlags As Long) As LongPtr"
         lines.Add "    Private Declare PtrSafe Function GetModuleHandleW Lib ""kernel32"" (ByVal lpModuleName As LongPtr) As LongPtr"
         lines.Add "    Private Declare PtrSafe Function GetFileAttributesW Lib ""kernel32"" (ByVal lpFileName As LongPtr) As Long"
-        lines.Add "    ' The DLL's own dependencies are looked for in its folder first."
+        lines.Add dependencyComment
         lines.Add "    Private Const LOAD_WITH_ALTERED_SEARCH_PATH As Long = 8"
         lines.Add "    Private Const LOAD_FAILED As Long = vbObjectError + &H2701"
-        lines.Add "    Private Const DLL_NAME As String = """ & mDll & """"
+    End Sub
+
+    Private Sub AddArchDir(lines As Collection)
         lines.Add "    #If Win64 Then"
         lines.Add "        Private Const ARCH_DIR As String = ""win64"""
         lines.Add "    #Else"
         lines.Add "        Private Const ARCH_DIR As String = ""win32"""
         lines.Add "    #End If"
-        lines.Add ""
-        lines.Add "    ' Loads folder\win32\" & mDll & " or folder\win64\" & mDll & " (matching the running code) when"
-        lines.Add "    ' that file exists, else folder\" & mDll & ". Returns the module handle. Raises an error naming"
-        lines.Add "    ' every path tried when it cannot load; an architecture file that exists but fails to load is"
-        lines.Add "    ' not passed over for folder\" & mDll & " (that could be the other architecture's DLL)."
-        lines.Add "    Public Function Load(ByVal folder As String) As LongPtr"
+    End Sub
+
+    ' The body of Load(folder) for the DLL named by nameExpr (a constant or a parameter): the
+    ' architecture subfolder first, then folder\ itself.
+    Private Sub AddLoadBody(lines As Collection, ByVal nameExpr As String)
         lines.Add "        Do While Len(folder) > 0 And (Right$(folder, 1) = ""\"" Or Right$(folder, 1) = ""/"")"
         lines.Add "            folder = Left$(folder, Len(folder) - 1)"
         lines.Add "        Loop"
-        lines.Add "        Dim archPath As String = folder & ""\"" & ARCH_DIR & ""\"" & DLL_NAME"
-        lines.Add "        Dim flatPath As String = folder & ""\"" & DLL_NAME"
+        lines.Add "        Dim archPath As String = folder & ""\"" & ARCH_DIR & ""\"" & " & nameExpr
+        lines.Add "        Dim flatPath As String = folder & ""\"" & " & nameExpr
         lines.Add "        Dim h As LongPtr, tried As String"
         lines.Add "        If GetFileAttributesW(StrPtr(archPath)) <> -1 Then"
         lines.Add "            h = LoadLibraryExW(StrPtr(archPath), 0, LOAD_WITH_ALTERED_SEARCH_PATH)"
@@ -891,24 +1017,8 @@ Class Emitter
         lines.Add "                tried &= flatPath & "" (not found)"""
         lines.Add "            End If"
         lines.Add "        End If"
-        lines.Add "        Err.Raise LOAD_FAILED, , ""cannot load "" & DLL_NAME & "": tried "" & tried"
-        lines.Add "    End Function"
-        lines.Add ""
-        lines.Add "    ' Loads " & mDll & " from one full path. Returns the module handle; raises an error naming"
-        lines.Add "    ' the path when it cannot load."
-        lines.Add "    Public Function LoadFile(ByVal path As String) As LongPtr"
-        lines.Add "        Dim h As LongPtr = LoadLibraryExW(StrPtr(path), 0, LOAD_WITH_ALTERED_SEARCH_PATH)"
-        lines.Add "        If h = 0 Then Err.Raise LOAD_FAILED, , ""cannot load "" & DLL_NAME & "": tried "" & path & "" (Windows error "" & Err.LastDllError & "")"""
-        lines.Add "        Return h"
-        lines.Add "    End Function"
-        lines.Add ""
-        lines.Add "    ' True when a module named " & mDll & " is loaded in this process."
-        lines.Add "    Public Function IsLoaded() As Boolean"
-        lines.Add "        Return GetModuleHandleW(StrPtr(DLL_NAME)) <> 0"
-        lines.Add "    End Function"
-        lines.Add "End Module"
-        Return JoinLines(lines)
-    End Function
+        lines.Add "        Err.Raise LOAD_FAILED, , ""cannot load "" & " & nameExpr & " & "": tried "" & tried"
+    End Sub
 
     ' The generation report (Markdown).
     Public Function ReportText() As String
@@ -923,11 +1033,32 @@ Class Emitter
             Next
         End If
         lines.Add ""
-        lines.Add "## Loading the DLL"
-        lines.Add "- The declares bind to " & mDll & " by name on the first call, through the Windows DLL search order: the folder of the process's EXE, the system folders, the current folder, then PATH. Subfolders are never searched; for a tB DLL or add-in, the EXE folder is the host's."
-        lines.Add "- To load it from elsewhere, call " & LoaderModuleName() & ".Load(folder) before the first call: it loads folder\win32\" & mDll & " or folder\win64\" & mDll & _
-            " (matching the running code) when that file exists, else folder\" & mDll & ", with the DLL's own dependencies from its folder. " & _
-            LoaderModuleName() & ".LoadFile(path) loads one full path."
+        ' D-053: each DLL a function binds to, with its function count
+        Dim names As Collection = mDlls.DllNames()
+        lines.Add "## DLLs"
+        If names.Count = 0 Then lines.Add "- none: no DLL exports any of the library's functions"
+        For Each s In names
+            lines.Add "- " & s & ": " & CountOf("dll:" & LCase$(s)) & If(CountOf("dll:" & LCase$(s)) = 1, " function", " functions") & _
+                If(mDlls.Checked(), "", " (not checked: no such DLL file or folder, so every function binds to this name)")
+        Next
+        lines.Add ""
+        If names.Count = 1 Then
+            Dim dll As String = names(1)
+            lines.Add "## Loading the DLL"
+            lines.Add "- The declares bind to " & dll & " by name on the first call, through the Windows DLL search order: the folder of the process's EXE, the system folders, the current folder, then PATH. Subfolders are never searched; for a tB DLL or add-in, the EXE folder is the host's."
+            lines.Add "- To load it from elsewhere, call " & LoaderModuleName() & ".Load(folder) before the first call: it loads folder\win32\" & dll & " or folder\win64\" & dll & _
+                " (matching the running code) when that file exists, else folder\" & dll & ", with the DLL's own dependencies from its folder. " & _
+                LoaderModuleName() & ".LoadFile(path) loads one full path."
+        Else
+            Dim list As String
+            For Each s In names
+                list &= If(Len(list) > 0, ", ", "") & s
+            Next
+            lines.Add "## Loading the DLLs"
+            lines.Add "- The declares bind to their DLLs (" & list & ") by name on the first call, through the Windows DLL search order: the folder of the process's EXE, the system folders, the current folder, then PATH. Subfolders are never searched; for a tB DLL or add-in, the EXE folder is the host's."
+            lines.Add "- To load them from elsewhere, call " & LoaderModuleName() & ".Load(folder) before the first call: it loads each DLL from folder\win32\ or folder\win64\ (matching the running code) when the file is there, else from folder\, with each DLL's own dependencies from its folder. " & _
+                LoaderModuleName() & ".LoadFile(path) loads one full path; call it once per DLL."
+        End If
         lines.Add ""
         If Not mReport Is Nothing Then
             For Each s In mSections

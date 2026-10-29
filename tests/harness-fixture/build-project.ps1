@@ -1,5 +1,6 @@
 # Builds the tbfixture runtime harness project (task 11):
-#   1. runs tbBlob on tests\fixture-c\tbfixture.h (+ --also tbfixture_sys.h, D-033) into tests\harness-fixture\bindings\
+#   1. runs tbBlob on tests\fixture-c\tbfixture.h (+ --also tbfixture_sys.h, D-033, and tbfixture_ext.h,
+#      D-053) with the bin\win64 and bin\win32 DLL folders into tests\harness-fixture\bindings\
 #   2. assembles tests\harness-fixture\project\ = Settings + Sources\ (harness) + bindings\Source\*.twin
 #   3. imports it into tests\harness-fixture\harness_fixture.twinproj with tBImportExport (D-023:
 #      packaging is the harness's job, not tbBlob's)
@@ -19,7 +20,8 @@ $tool = "$root\tools\impexp\Build\tBImportExport_win64.exe"
 . "$root\tests\harness-sync.ps1"
 $new = if ($BindingsOnly) { $BindingsOnly } else { "$here\bindings.new" }
 if (Test-Path $new) { Remove-Item -Recurse -Force $new }
-& $tbBlob "$root\tests\fixture-c" tbfixture.h tbfixture.dll $new --castxml $castxml --x86-dll "$root\tests\fixture-c\bin\win32\tbfixture.dll" --also tbfixture_sys.h
+# The DLL folders (D-053): each function binds to tbfixture.dll or tbfixture_ext.dll by their export tables.
+& $tbBlob "$root\tests\fixture-c" tbfixture.h "$root\tests\fixture-c\bin\win64" $new --castxml $castxml --x86-dll "$root\tests\fixture-c\bin\win32" --also tbfixture_sys.h --also tbfixture_ext.h
 if ($LASTEXITCODE -ne 0) { Write-Host "FAILED: tbBlob exit $LASTEXITCODE"; exit 1 }
 if ($BindingsOnly) { exit 0 }
 $changed = Sync-Bindings $new "$here\bindings"

@@ -23,25 +23,23 @@ Module Pipeline
     Public Function Generate(o As CliOptions) As Long
         LastError = ""
         Dim outputFolder As String = FileSys.FullPath(o.OutputFolder)
+        ' D-053: the DLLs first (quick, and a mistake there should not wait for CastXML)
+        Dim dlls As New DllSet
+        If FileSys.KindOf(o.DllName) <> FileSys.KIND_NONE Or Len(o.X86DllPath) > 0 Then Progress "reading the DLLs' export tables"
+        Dim problem As String = dlls.Load(o.DllName, o.X86DllPath, o.DllOverrides)
+        dlls.KeepUnexported = o.KeepUnexported
+        If Len(problem) > 0 Then Return Fail(problem, MainModule.EXIT_FAILED)
         Progress "running CastXML (x86, x64, macro dump, preprocessed headers) into " & outputFolder & "\Work"
         Dim r As CastXmlResult = CastXmlRunner.RunCastXml(o, outputFolder & "\Work")
         If r.ExitCode <> 0 Then Return Fail(r.ErrorText, r.ExitCode)
-        Dim exports As Collection
-        If Len(o.X86DllPath) > 0 Then
-            Progress "reading the export names of " & o.X86DllPath
-            On Error GoTo ExportsFailed
-            Set exports = PeExports.ExportNames(o.X86DllPath)
-            On Error GoTo 0
-        End If
-        Return GenerateFrom(r.Xml86Path, r.Xml64Path, r.Macros86Path, r.Macros64Path, r.Preprocessed64Path, o.HeaderFolder, o.DllName, o.ProjectName, outputFolder, exports)
-    ExportsFailed:
-        Return Fail("--x86-dll: " & Err.Description, MainModule.EXIT_FAILED)
+        Return GenerateFrom(r.Xml86Path, r.Xml64Path, r.Macros86Path, r.Macros64Path, r.Preprocessed64Path, o.HeaderFolder, dlls, o.ProjectName, outputFolder)
     End Function
 
-    ' Everything after CastXML, from its five output files (x86Exports: see Emitter.X86Exports). Returns the exit code: 0 done,
-    ' 1 failed (LastError says why; an x86/x64 disagreement writes nothing). preprocessed64File "":
+    ' Everything after CastXML, from its five output files; dlls says which DLL each function binds
+    ' to (D-053). Returns the exit code: 0 done, 1 failed (LastError says why; an x86/x64
+    ' disagreement or a function more than one DLL exports writes nothing). preprocessed64File "":
     ' no preprocessed headers, so every callback's parameter names are reported lost (D-060).
-    Public Function GenerateFrom(ByVal xml86 As String, ByVal xml64 As String, ByVal macros86File As String, ByVal macros64File As String, ByVal preprocessed64File As String, ByVal headerFolder As String, ByVal dllName As String, ByVal projectName As String, ByVal outputFolder As String, Optional ByVal x86Exports As Collection = Nothing) As Long
+    Public Function GenerateFrom(ByVal xml86 As String, ByVal xml64 As String, ByVal macros86File As String, ByVal macros64File As String, ByVal preprocessed64File As String, ByVal headerFolder As String, dlls As DllSet, ByVal projectName As String, ByVal outputFolder As String) As Long
         LastError = ""
         Dim m86 As New CxModel
         Dim m64 As New CxModel
@@ -95,14 +93,21 @@ Module Pipeline
         Progress stage
         Set e = New Emitter
         e.FailOn = TestFailOn
-        Set e.X86Exports = x86Exports
-        e.Init map64, map86, macros, dllName, headerFolder, projectName
+        e.Init map64, map86, macros, dlls, headerFolder, projectName
         e.UseX86Macros macros86
         If Not pp Is Nothing Then e.UsePreprocessed pp
 
         stage = "generating .twin modules"
         Progress stage
         e.Generate
+        If dlls.Ambiguous().Count > 0 Then
+            Dim amb As String = "functions exported by more than one DLL (nothing written); bind each with --dll <function or header>=<dll file name>:"
+            Dim a As Variant
+            For Each a In dlls.Ambiguous()
+                amb &= vbLf & "  " & a
+            Next
+            Return Fail(amb, MainModule.EXIT_FAILED)
+        End If
 
         Dim outFull As String = FileSys.FullPath(outputFolder)
         stage = "writing " & outFull

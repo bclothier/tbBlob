@@ -78,6 +78,7 @@
 | D-059 | 29.0, 30.0 | Plan | cairo-dwrite.h: 5 hand-written declares, documented and tested; cairo run proves the header skip | Active |
 | D-060 | Issue #1 | Task-only | Callback parameter names come from the compiler's preprocessed headers (castxml -E), not the raw header text | Active |
 | D-061 | Issue #1 | Finding | Known issue: CastXML (C mode) cannot read the SDK's webservices.h — two empty enums | Active |
+| D-062 | 26.0 | Task-only | D-053 as built: project named after the entry header for a DLL folder; multi-DLL loader raises; libgit2 loses 9 unexported declares; --keep-unexported | Active |
 
 ---
 ### D-001 — tB UDT layout equals C natural alignment for all 85 libgit2 structs, both archs (Task: Spike)
@@ -815,3 +816,20 @@
 - Rationale: the user chose to note it and return to the cairo work; tbBlob does not edit the SDK's headers.
 - Alternatives considered (for a later fix): ask the reporter how they ran it; C++ mode for such headers (empty enums are valid C++; reopens D-059); a patched copy of the header (tbBlob editing Microsoft's header — advised against). D-057's header skip does not help when the entry header itself includes `webservices.h`.
 - Verified under: CastXML 0.6.5 (clang 18.1.3) with `--castxml-cc-msvc-c cl` and vcvars32; SDK 10.0.22621 and 10.0.26100 (both have the two empty enums). CastXML 0.6.20260105 (clang 21.1.8) fails earlier, in `winioctl.h` (`use of undeclared label 'Cleanup'`).
+
+---
+### D-062 — D-053 as built: details settled while implementing task 26.0 (Task 26.0)
+- Date: 2026-10-28
+- Scope: Task-only
+- Status: Active
+- Context: implementing D-053 (`DllSet`, `--dll`, folders for `<dll>` and `--x86-dll`) raised points D-053 and 26.1 left open or got slightly wrong.
+- Decision:
+  - **Project name.** `--name` defaults to the DLL's name without extension; when `<dll>` is a folder that would be the folder's name (`win64`, `bin`), so the default is then the entry header's name (`cairo.h` → `cairo`, `tbfixture.h` → `tbfixture`). Applied after parsing (`CliOptions.ApplyDiskDefaults`), since `Parse` does not touch the disk.
+  - **Loader.** One bound DLL: exactly D-027's text (proven byte-identical). Several: `Load(folder)` loads each in binding order with the same folder rule and **raises** (naming the DLL and the paths tried) when one cannot load, as D-027's does, instead of returning 0 as 26.1 said; `LoadFile` once per DLL; `IsLoaded()` True when all are loaded.
+  - **Bare-name mode is unchanged.** The fixture's `.twin` output is byte-identical to a snapshot taken before the change (`tests\testdata\emitter-bare\`), including D-031's x86 `NOTE` for a function the `--x86-dll` does not export. The report gains a "DLLs" section saying the name was not checked.
+  - **libgit2 is not byte-identical** (26.3(c) expected it to be): with the `bin` folders, the 9 header functions `git2.dll` does not export (D-031's 2 from `git2.h`, and 7 from `git2/sys`) get no declare instead of a declare with a `NOTE`; every other line is identical (checked against the previous bindings), and "Exported but not declared" lists `git_config_unlock` and `git_odb__backend_loose`. 960 → 951 functions. The fixture harness's D-031 check (calling `tbf_not_exported` raises) became a report check: the function has no declare.
+  - **`--keep-unexported`** (the user, 2026-10-28: "can one opt to force to include no-export DLL?"). A function no DLL exports is declared anyway instead of skipped: bound to the DLL most of its header's other functions bind to, else the only DLL read, else still skipped with the report naming `--dll`. The emitter binds every function before emitting, so the choice does not depend on declaration order. The declare gets `' NOTE: not exported by <dll> (declared because of --keep-unexported): a call fails at run time unless the DLL loaded then exports it` and stays under "Declared but not exported". An explicit `--dll <f>=<dll>` to a DLL that does not export `<f>` binds it the same way (it did silently before), with `--dll` named in the note. Bare-name mode is unaffected. Use: a DLL that exports more at run time than the one generated against, or exports by ordinal only.
+  - The DLLs are read before CastXML runs (a mistake there fails at once). A `.dll` that is not a PE file, or a folder without DLLs, fails the run (exit 1) naming it; a missing `--x86-dll` exits 3 in `MainModule`.
+  - Tests: the `--dll` / `--x86-dll` command-line tests live in `Tests_Dlls` with the rest of the task's tests, not in `Tests_Cli`. Method: not red-first — `DllSet`, the emitter/pipeline signatures and the tests were written together and compiled once; the bare-name snapshot test pins the old behaviour.
+- Rationale: an entry header names a library better than a folder does; raising matches the existing loader and the harness's checks; skipping an unexported function is D-053's point, and the libgit2 diff shows it removes exactly the declares that could never be called.
+- Alternatives considered: `--name` required with a folder (needless when the entry header names the library); a multi-DLL `Load` returning 0 on failure (silently half-loaded); keeping a `NOTE`ed declare for unexported functions in folder mode (a call that cannot work).

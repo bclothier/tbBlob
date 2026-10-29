@@ -22,7 +22,7 @@ other 2 are in no public header. Counts below come from those bindings.
 
 | | Generated | Called by the harness |
 |---|---|---|
-| Functions | 960 | 52 (~5%) |
+| Functions | 951 (the 9 header functions `git2.dll` doesn't export get no declare, D-053) | 52 (~5%) |
 | Types (structs) | 108 | 9 used directly (`git_oid`, `git_signature`, `git_time`, `git_error`, `git_strarray`, `git_diff_options`, `git_diff_delta`, `git_clone_options` with its nested checkout/fetch/remote-callback options, `git_indexer_progress`), plus every Type checked by the layout check |
 | Enums | 91 | constants from a few (`GIT_ITEROVER`, `GIT_ENOTFOUND`, `GIT_EEXISTS`, `GIT_ERROR_INVALID`, `GIT_SORT_TOPOLOGICAL`, `GIT_DELTA_*`, `GIT_CLONE_NO_LOCAL`, `GIT_OPT_*`) |
 | Callback delegates | 164 (89 of them from the `sys` backend/transport/filter structs) | 3 (`git_reference_foreach_name_cb`, `git_checkout_progress_cb`, `git_indexer_progress_cb`) |

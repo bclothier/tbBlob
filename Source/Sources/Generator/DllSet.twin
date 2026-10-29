@@ -1,0 +1,265 @@
+' Which DLL each library function binds to (D-053). <dll> is a DLL file, a folder of DLLs (each
+' *.dll directly in it), or a bare name that is neither: then every function binds to that name
+' and nothing is checked (generating where the DLL is absent). Otherwise a function binds to the
+' DLL whose x64 export table has it; --dll <function or header>=<dll file name> settles one that
+' more than one DLL exports. --x86-dll (file or folder) gives each DLL's x86 export names, which
+' decide how x86 __stdcall functions are bound (D-026).
+Class DllSet
+    ' --keep-unexported: a function no DLL exports is bound anyway (FallbackFor) instead of being
+    ' skipped (D-062).
+    Public KeepUnexported As Boolean
+
+    Private mBare As String             ' the bare name; "" when DLLs were read
+    Private mHeaderBound As Collection  ' LCase(header path) -> Collection of the DLLs its functions bound to
+    Private mDlls As Collection         ' file names, folder order
+    Private mExports As Collection      ' LCase(file name) -> Collection (export name -> True)
+    Private mX86 As Collection          ' LCase(file name) -> Collection (export name -> True)
+    Private mOverrides As Collection    ' "f:" & function or "h:" & LCase(header file name) -> DLL file name
+    Private mUsed As Collection         ' DLL file names in the order a function first binds to them
+    Private mUsedKeys As Collection     ' LCase(file name) -> True
+    Private mAmbiguous As Collection    ' "name: a.dll, b.dll"
+    Private mSeen As Collection         ' function names already bound
+
+    ' Keyed tB Collections with case-sensitive keys (D-040); DLL file names are keyed in lower
+    ' case (Windows file names), function names as they are (C names).
+    Private Sub Class_Initialize()
+        Set mDlls = New Collection
+        Set mExports = Keyed()
+        Set mX86 = Keyed()
+        Set mOverrides = Keyed()
+        Set mUsed = New Collection
+        Set mUsedKeys = Keyed()
+        Set mAmbiguous = New Collection
+        Set mSeen = Keyed()
+        Set mHeaderBound = Keyed()
+    End Sub
+
+    Private Function Keyed() As Collection
+        Dim c As New Collection
+        c.KeyCompareMode = vbBinaryCompare
+        Return c
+    End Function
+
+    ' Reads the DLLs of dllArg (file, folder or bare name), the x86 ones of x86Arg ("", file or
+    ' folder) and the --dll overrides ("<function or header>=<dll file name>"). Returns "" or
+    ' what is wrong (a DLL that is not a PE file, a folder without DLLs, a bad override).
+    Public Function Load(ByVal dllArg As String, ByVal x86Arg As String, overrides As Collection) As String
+        Dim p As Variant, problem As String
+        On Error GoTo Unreadable
+        Select Case FileSys.KindOf(dllArg)
+            Case FileSys.KIND_FILE
+                AddExports FileSys.BaseName(dllArg), PeExports.ExportNames(dllArg), Nothing
+            Case FileSys.KIND_FOLDER
+                For Each p In DllFiles(dllArg)
+                    AddExports FileSys.BaseName(p), PeExports.ExportNames(p), Nothing
+                Next
+                If mDlls.Count = 0 Then Return "no DLL in " & dllArg
+            Case Else
+                UseName dllArg
+        End Select
+        Select Case FileSys.KindOf(x86Arg)
+            Case FileSys.KIND_FILE
+                ' one x86 DLL for one DLL: they pair whatever their names
+                If Len(mBare) > 0 Then
+                    AddX86Exports mBare, PeExports.ExportNames(x86Arg)
+                ElseIf mDlls.Count = 1 Then
+                    AddX86Exports mDlls(1), PeExports.ExportNames(x86Arg)
+                Else
+                    AddX86Exports FileSys.BaseName(x86Arg), PeExports.ExportNames(x86Arg)
+                End If
+            Case FileSys.KIND_FOLDER
+                For Each p In DllFiles(x86Arg)
+                    AddX86Exports FileSys.BaseName(p), PeExports.ExportNames(p)
+                Next
+        End Select
+        On Error GoTo 0
+        For Each p In overrides
+            problem = AddOverride(p)
+            If Len(problem) > 0 Then Return problem
+        Next
+        Return ""
+    Unreadable:
+        Return Err.Description
+    End Function
+
+    ' The *.dll files directly in folder, full paths, in ordinal order.
+    Private Function DllFiles(ByVal folder As String) As Collection
+        Dim r As New Collection, names() As String, n As Long, i As Long
+        n = FileSys.ListNames(folder, names)
+        If n = 0 Then Return r
+        TextKit.SortOrdinal names, n
+        For i = 0 To n - 1
+            If LCase$(FileSys.ExtName(names(i))) = ".dll" Then
+                If FileSys.KindOf(folder & "\" & names(i)) = FileSys.KIND_FILE Then r.Add folder & "\" & names(i)
+            End If
+        Next
+        Return r
+    End Function
+
+    ' Bare-name mode: every function binds to name; nothing is checked.
+    Public Sub UseName(ByVal name As String)
+        mBare = name
+    End Sub
+
+    ' Adds a DLL and its x64 export names (x86Names: Nothing when there is no x86 DLL). Load uses
+    ' it; tests build a DllSet from in-memory lists with it.
+    Public Sub AddExports(ByVal dll As String, x64Names As Collection, x86Names As Collection)
+        mDlls.Add dll
+        mExports.Add x64Names, LCase$(dll)
+        If Not x86Names Is Nothing Then AddX86Exports dll, x86Names
+    End Sub
+
+    ' The x86 export names of dll (replacing any given before).
+    Public Sub AddX86Exports(ByVal dll As String, names As Collection)
+        If mX86.Exists(LCase$(dll)) Then mX86.Remove LCase$(dll)
+        mX86.Add names, LCase$(dll)
+    End Sub
+
+    ' One --dll value, "<function or header>=<dll file name>" (a header is a name ending in .h).
+    ' Returns "" or what is wrong with it.
+    Public Function AddOverride(ByVal spec As String) As String
+        Dim eq As Long = InStr(spec, "=")
+        If eq < 2 Or eq = Len(spec) Then Return "--dll " & spec & ": expected <function or header>=<dll file name>"
+        Dim key As String = Left$(spec, eq - 1)
+        Dim dll As String = Mid$(spec, eq + 1)
+        If Len(mBare) = 0 Then
+            If Not mExports.Exists(LCase$(dll)) Then Return "--dll " & spec & ": " & dll & " is not one of the DLLs (" & Join(ToArray(mDlls), ", ") & ")"
+            dll = NameAsRead(dll)
+        End If
+        If LCase$(FileSys.ExtName(key)) = ".h" Then key = "h:" & LCase$(FileSys.BaseName(key)) Else key = "f:" & key
+        If mOverrides.Exists(key) Then mOverrides.Remove key
+        mOverrides.Add dll, key
+        Return ""
+    End Function
+
+    ' dll spelled as the file name that was read.
+    Private Function NameAsRead(ByVal dll As String) As String
+        Dim v As Variant
+        For Each v In mDlls
+            If LCase$(v) = LCase$(dll) Then Return v
+        Next
+        Return dll
+    End Function
+
+    Private Function ToArray(c As Collection) As Variant
+        If c.Count = 0 Then Return Array()
+        Dim a() As String, i As Long
+        ReDim a(0 To c.Count - 1)
+        For i = 1 To c.Count
+            a(i - 1) = c(i)
+        Next
+        Return a
+    End Function
+
+    ' False in bare-name mode (nothing read, nothing checked).
+    Public Function Checked() As Boolean
+        Return Len(mBare) = 0
+    End Function
+
+    ' The DLL file name cname binds to; "" when no DLL exports it (never "" in bare-name mode).
+    ' headerPath is the declaring header, for a --dll override by header. A function that more
+    ' than one DLL exports binds to the first and is recorded in Ambiguous().
+    Public Function DllFor(ByVal cname As String, Optional ByVal headerPath As String = "") As String
+        Dim dll As String
+        If Len(mBare) > 0 Then
+            dll = mBare
+        ElseIf mOverrides.Exists("f:" & cname) Then
+            dll = mOverrides("f:" & cname)
+        ElseIf Len(headerPath) > 0 And mOverrides.Exists("h:" & LCase$(FileSys.BaseName(headerPath))) Then
+            dll = mOverrides("h:" & LCase$(FileSys.BaseName(headerPath)))
+        Else
+            Dim v As Variant, ex As Collection, all As String
+            For Each v In mDlls
+                Set ex = mExports(LCase$(v))
+                If ex.Exists(cname) Then
+                    If Len(dll) = 0 Then dll = v
+                    all &= If(Len(all) > 0, ", ", "") & v
+                End If
+            Next
+            If all <> dll And Not mSeen.Exists(cname) Then mAmbiguous.Add cname & ": " & all
+        End If
+        If Not mSeen.Exists(cname) Then
+            mSeen.Add True, cname
+            ' which DLLs a header's functions bind to, for FallbackFor
+            If Len(dll) > 0 And Len(headerPath) > 0 Then
+                If Not mHeaderBound.Exists(LCase$(headerPath)) Then mHeaderBound.Add New Collection, LCase$(headerPath)
+                mHeaderBound(LCase$(headerPath)).Add dll
+            End If
+        End If
+        If Len(dll) > 0 Then NoteUsed dll
+        Return dll
+    End Function
+
+    Private Sub NoteUsed(ByVal dll As String)
+        If mUsedKeys.Exists(LCase$(dll)) Then Exit Sub
+        mUsedKeys.Add True, LCase$(dll)
+        mUsed.Add dll
+    End Sub
+
+    ' --keep-unexported (D-062): the DLL to bind cname to when no DLL exports it -- the one most of
+    ' its header's other functions bound to (DllFor must have seen them), else the only DLL read;
+    ' "" when neither tells.
+    Public Function FallbackFor(ByVal cname As String, ByVal headerPath As String) As String
+        Dim dll As String, best As Long, n As Long, v As Variant, w As Variant
+        If mHeaderBound.Exists(LCase$(headerPath)) Then
+            Dim bound As Collection = mHeaderBound(LCase$(headerPath))
+            For Each v In bound
+                n = 0
+                For Each w In bound
+                    If w = v Then n += 1
+                Next
+                If n > best Then
+                    best = n
+                    dll = v
+                End If
+            Next
+        End If
+        If Len(dll) = 0 And mDlls.Count = 1 Then dll = mDlls(1)
+        If Len(dll) > 0 Then NoteUsed dll
+        Return dll
+    End Function
+
+    ' True when dll's export table has cname (always in bare-name mode: nothing is checked).
+    Public Function Exports(ByVal dll As String, ByVal cname As String) As Boolean
+        If Len(mBare) > 0 Then Return True
+        If Not mExports.Exists(LCase$(dll)) Then Return False
+        Dim ex As Collection = mExports(LCase$(dll))
+        Return ex.Exists(cname)
+    End Function
+
+    ' True when a --dll override names cname or its header.
+    Public Function Overridden(ByVal cname As String, Optional ByVal headerPath As String = "") As Boolean
+        If mOverrides.Exists("f:" & cname) Then Return True
+        If Len(headerPath) > 0 Then Return mOverrides.Exists("h:" & LCase$(FileSys.BaseName(headerPath)))
+        Return False
+    End Function
+
+    ' "name: a.dll, b.dll" for each function more than one DLL exports and no --dll settles.
+    Public Function Ambiguous() As Collection
+        Return mAmbiguous
+    End Function
+
+    ' The DLLs functions were bound to, in the order they first were.
+    Public Function DllNames() As Collection
+        Return mUsed
+    End Function
+
+    ' dll's x86 export names, or Nothing when no x86 DLL of that name was read.
+    Public Function X86Exports(ByVal dll As String) As Collection
+        If mX86.Exists(LCase$(dll)) Then Return mX86(LCase$(dll))
+        Return Nothing
+    End Function
+
+    ' dll's exports that are not in declared (name -> anything), in export table order; none in
+    ' bare-name mode.
+    Public Function ExportedNotDeclared(ByVal dll As String, declared As Collection) As Collection
+        Dim r As New Collection
+        If Len(mBare) > 0 Or Not mExports.Exists(LCase$(dll)) Then Return r
+        Dim ex As Collection = mExports(LCase$(dll))
+        Dim k As Variant
+        For Each k In ex.Keys()
+            If Not declared.Exists(k) Then r.Add k
+        Next
+        Return r
+    End Function
+End Class

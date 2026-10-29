@@ -22,14 +22,16 @@ Module MainModule
     Public Function Usage() As String
         Return Join(Array( _
             "Usage:", _
-            "  tbBlob <header folder> <entry header> <dll name> <output folder> [options]", _
+            "  tbBlob <header folder> <entry header> <dll> <output folder> [options]", _
             "  tbBlob --check [--castxml <path>]", _
             "  tbBlob --self-test [--integration]", _
             "  tbBlob --help", _
             "", _
             "Generates twinBASIC bindings (Declares, Types, Enums, Delegates, constants) for the C", _
-            "library whose headers are in <header folder>, starting from <entry header>, bound to", _
-            "<dll name>. It writes, in <output folder>:", _
+            "library whose headers are in <header folder>, starting from <entry header>. <dll> is the", _
+            "x64 DLL, or a folder of DLLs: each function is bound to the DLL whose export table has it,", _
+            "and one no DLL exports is skipped and reported. A name that is no file or folder here", _
+            "binds every function to that name, unchecked. It writes, in <output folder>:", _
             "  report.md   read this first: what was generated, skipped, renamed or lost", _
             "  Source\     the .twin files, one module per header, plus <name>_LayoutCheck.twin", _
             "              and <name>_Loader.twin (optional: load the DLL from a folder you choose)", _
@@ -37,7 +39,8 @@ Module MainModule
             "Adding the .twin files to a project is up to you.", _
             "", _
             "Options:", _
-            "  --name <name>        project name (default: the DLL name without its extension)", _
+            "  --name <name>        project name (default: the DLL name without its extension; for a", _
+            "                       folder of DLLs, the entry header's)", _
             "  -I <folder>          extra include folder for CastXML (repeatable)", _
             "  -D <name[=value]>    preprocessor define for CastXML (repeatable)", _
             "  --castxml <path>     castxml.exe (default: the CASTXML variable, then castxml\bin\castxml.exe", _
@@ -46,8 +49,13 @@ Module MainModule
             "                       OK or MISSING with the fix for each, and exit (0 all OK, 4 missing)", _
             "  --also <header>      another header to generate from, relative to the header folder", _
             "                       (repeatable; e.g. headers the entry header does not include)", _
-            "  --x86-dll <path>     the built x86 DLL: its export table decides whether each", _
-            "                       __stdcall function is bound as name or _name@N on x86", _
+            "  --x86-dll <path>     the built x86 DLL, or a folder of them: the export tables decide", _
+            "                       whether each __stdcall function is bound as name or _name@N on x86", _
+            "  --dll <f>=<dll>      bind function <f>, or every function of header <f> (a name ending", _
+            "                       in .h), to <dll>: for a function more than one DLL exports", _
+            "                       (repeatable); it binds <f> even if <dll> does not export it", _
+            "  --keep-unexported    declare functions no DLL exports anyway (with a NOTE), bound to the", _
+            "                       DLL their header's other functions bind to, instead of skipping them", _
             "  --self-test          run the built-in tests; --integration adds tests that use", _
             "                       CastXML, MSVC, MSXML6 and (to test the output) the import tool", _
             "", _
@@ -55,7 +63,7 @@ Module MainModule
             "  0  done", _
             "  1  failed (see the message and the generation report)", _
             "  2  a mistake in the command line", _
-            "  3  the header folder or the entry header does not exist", _
+            "  3  the header folder, the entry header, an --also header or --x86-dll does not exist", _
             "  4  a required tool or file (CastXML, its resource headers, MSVC, the Windows SDK) was", _
             "     not found -- run tbBlob --check to see which and how to fix it"), vbLf)
     End Function
@@ -95,6 +103,11 @@ Module MainModule
                 Return EXIT_MISSING_PATH
             End If
         Next
+        If Len(o.X86DllPath) > 0 And FileSys.KindOf(o.X86DllPath) = FileSys.KIND_NONE Then
+            Console.WriteErr "ERROR: --x86-dll not found: " & o.X86DllPath
+            Return EXIT_MISSING_PATH
+        End If
+        o.ApplyDiskDefaults
 
         If FileSys.KindOf(o.OutputFolder) = FileSys.KIND_FILE Then
             Console.WriteErr "ERROR: the output " & o.OutputFolder & " is a file, not a folder" & vbLf & vbLf & Usage()

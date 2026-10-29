@@ -6,7 +6,10 @@ Class CliOptions
     Public OutputFolder As String   ' D-023: tbBlob writes report.md, Source\ and Work\ here
     Public ProjectName As String
     Public CastXmlPath As String
-    Public X86DllPath As String     ' --x86-dll: the built x86 DLL, read for its export names (D-026)
+    Public X86DllPath As String     ' --x86-dll: the x86 DLL or a folder of them, read for export names (D-026, D-053)
+    Public DllOverrides As New Collection   ' --dll: "<function or header>=<dll file name>" (D-053)
+    Public ProjectNameGiven As Boolean      ' --name was given
+    Public KeepUnexported As Boolean        ' --keep-unexported: declare functions no DLL exports (D-062)
     Public IncludeDirs As New Collection
     Public Defines As New Collection
     Public AlsoHeaders As New Collection    ' --also: extra entry headers, relative to the header folder (D-033)
@@ -32,11 +35,18 @@ Class CliOptions
                     Me.Help = True
                 Case "--check"
                     Me.Check = True
-                Case "--name", "-I", "-D", "--castxml", "--x86-dll", "--also"
+                Case "--keep-unexported"
+                    KeepUnexported = True
+                Case "--name", "-I", "-D", "--castxml", "--x86-dll", "--also", "--dll"
                     If i = UBound(args) Then Return "option " & a & " needs a value"
                     i += 1
                     Select Case a
-                        Case "--name": ProjectName = args(i)
+                        Case "--name"
+                            ProjectName = args(i)
+                            ProjectNameGiven = True
+                        Case "--dll"
+                            If InStr(args(i), "=") < 2 Or Right$(args(i), 1) = "=" Then Return "option --dll needs <function or header>=<dll file name>, got: " & args(i)
+                            DllOverrides.Add args(i)
                         Case "-I": IncludeDirs.Add args(i)
                         Case "-D": Defines.Add args(i)
                         Case "--castxml": CastXmlPath = args(i)
@@ -58,10 +68,20 @@ Class CliOptions
         EntryHeader = positional(2)
         DllName = positional(3)
         OutputFolder = positional(4)
-        If Len(ProjectName) = 0 Then
-            ProjectName = FileSys.BaseName(DllName)
-            If InStrRev(ProjectName, ".") > 1 Then ProjectName = Left$(ProjectName, InStrRev(ProjectName, ".") - 1)
-        End If
+        If Len(ProjectName) = 0 Then ProjectName = NameWithoutExtension(DllName)
         Return ""
     End Function
+
+    ' The last part of path without its extension: "C:\b\git2.dll" -> "git2".
+    Public Function NameWithoutExtension(ByVal path As String) As String
+        Dim n As String = FileSys.BaseName(path)
+        If InStrRev(n, ".") > 1 Then n = Left$(n, InStrRev(n, ".") - 1)
+        Return n
+    End Function
+
+    ' Defaults that depend on the disk (Parse does not touch it): when <dll> is a folder of DLLs
+    ' and --name was not given, the project is named after the entry header (D-062).
+    Public Sub ApplyDiskDefaults()
+        If Not ProjectNameGiven And FileSys.KindOf(DllName) = FileSys.KIND_FOLDER Then ProjectName = NameWithoutExtension(EntryHeader)
+    End Sub
 End Class

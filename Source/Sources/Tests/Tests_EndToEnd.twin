@@ -45,7 +45,7 @@ Module Tests_EndToEnd
     Private Function FromSnapshots(ByVal outFolder As String, ByRef output As String) As Long
         Console.StartCapture
         Dim code As Long = Pipeline.GenerateFrom(Snap("tbfixture_x86.xml"), Snap("tbfixture_x64.xml"), Snap("tbfixture_macros_x86.txt"), Snap("tbfixture_macros_x64.txt"), Snap("tbfixture_x64.i"), _
-            SelfTest.RepoRoot() & "\tests\fixture-c", "tbfixture.dll", "tbfixture", outFolder)
+            SelfTest.RepoRoot() & "\tests\fixture-c", Tests_Dlls.Named("tbfixture.dll"), "tbfixture", outFolder)
         output = Console.StopCapture()
         Return code
     End Function
@@ -115,7 +115,7 @@ Module Tests_EndToEnd
         FileSys.WriteTextUtf8 t & "\macros.txt", ""
         Console.StartCapture
         Dim code As Long = Pipeline.GenerateFrom(SelfTest.RepoRoot() & "\tests\testdata\typemap\disagree_x86.xml", _
-            SelfTest.RepoRoot() & "\tests\testdata\typemap\disagree_x64.xml", t & "\macros.txt", t & "\macros.txt", "", "C:\lib\include", "s.dll", "s", t & "\out")
+            SelfTest.RepoRoot() & "\tests\testdata\typemap\disagree_x64.xml", t & "\macros.txt", t & "\macros.txt", "", "C:\lib\include", Tests_Dlls.Named("s.dll"), "s", t & "\out")
         Dim out As String = Console.StopCapture()
         Dim written As String = Names(t & "\out")
         FileSys.RemovePath t

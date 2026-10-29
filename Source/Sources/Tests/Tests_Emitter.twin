@@ -77,7 +77,17 @@ Module Tests_Emitter
 
     ' ---- helpers ---------------------------------------------------------------
 
-    Private Function Built(Optional ByVal x86Exports As Collection = Nothing) As Emitter
+    ' The fixture generated with dlls (D-053); without it, bound to the bare name tbfixture.dll
+    ' with x86Exports as its x86 export names (Nothing: not checked).
+    Public Function BuiltWith(dlls As DllSet) As Emitter
+        Return Built(Nothing, dlls)
+    End Function
+
+    Private Function Built(Optional ByVal x86Exports As Collection = Nothing, Optional dlls As DllSet = Nothing) As Emitter
+        If dlls Is Nothing Then
+            Set dlls = Tests_Dlls.Named("tbfixture.dll")
+            If Not x86Exports Is Nothing Then dlls.AddX86Exports "tbfixture.dll", x86Exports
+        End If
         Dim root As String = SelfTest.RepoRoot()
         Dim headers As String = root & "\tests\fixture-c"
         Dim m64 As New CxModel
@@ -95,12 +105,11 @@ Module Tests_Emitter
         macros86.ParseDump FileSys.ReadTextUtf8(root & "\tests\testdata\fixture\tbfixture_macros_x86.txt")
         macros86.ScanLibrary headers
         Dim e As New Emitter
-        e.Init t64, t86, macros, "tbfixture.dll", headers, "tbfixture"
+        e.Init t64, t86, macros, dlls, headers, "tbfixture"
         e.UseX86Macros macros86
         Dim pp As New PreprocessedSource
         pp.Load SelfTest.Fixture("tbfixture_x64.i")
         e.UsePreprocessed pp
-        Set e.X86Exports = x86Exports
         e.Generate
         Return e
     End Function

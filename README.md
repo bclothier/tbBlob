@@ -5,7 +5,8 @@ tbBlob generates **twinBASIC bindings for a C library** from its header files: `
 It uses [CastXML](https://github.com/CastXML/CastXML) to read the headers exactly as the Microsoft
 C compiler does, and writes a report of everything it could not express.
 
-It has been proven on all of libgit2 1.9.1 (960 functions): the bindings compile for both
+It has been proven on all of libgit2 1.9.1 (951 functions, every one `git2.dll` exports and a
+header declares): the bindings compile for both
 architectures, every generated struct matches C's memory layout, and a real git workflow plus a
 clone with callbacks run through them. See `tasks\verdict-castxml-ffi-generator.md`.
 

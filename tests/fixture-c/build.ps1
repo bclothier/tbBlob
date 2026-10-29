@@ -30,15 +30,17 @@ foreach ($a in $archs) {
     $cl = "cl /nologo /W4 /WX /wd4121 /wd4324 /std:c11 /utf-8"
     $buildDll = "$cl /LD `"$here\tbfixture.c`" /Fo`"$obj\\`" /Fe`"$bin\tbfixture.dll`" /link /DEF:`"$here\tbfixture.def`""
     $buildTest = "$cl `"$here\test_tbfixture.c`" `"$bin\tbfixture.lib`" /Fo`"$obj\\`" /Fe`"$bin\test_tbfixture.exe`""
+    # A second DLL of the same library, using tbfixture.h's types (D-053).
+    $buildExt = "$cl /LD `"$here\tbfixture_ext.c`" /Fo`"$obj\\`" /Fe`"$bin\tbfixture_ext.dll`""
     $log = "$bin\build.log"
     # All redirection inside cmd: vcvars writes noise to stderr, which PowerShell would treat as an error.
-    cmd /c "`"$vc`" >nul 2>nul && ($buildDll && $buildTest) > `"$log`" 2>&1"
+    cmd /c "`"$vc`" >nul 2>nul && ($buildDll && $buildTest && $buildExt) > `"$log`" 2>&1"
     if ($LASTEXITCODE -ne 0) {
         Get-Content $log | ForEach-Object { Write-Host "  $_" }
         Fail "$($a.name): build"
         continue
     }
-    Write-Host "built $($a.name): $bin\tbfixture.dll, test_tbfixture.exe"
+    Write-Host "built $($a.name): $bin\tbfixture.dll, tbfixture_ext.dll, test_tbfixture.exe"
 
     # Integration check: PE machine type of the DLL.
     $bytes = [IO.File]::ReadAllBytes("$bin\tbfixture.dll")
@@ -73,6 +75,18 @@ foreach ($a in $archs) {
         Write-Host "PASS $($a.name): stdcall exports $wantAdd and tbf_std_sub"
     } else { Fail "$($a.name): expected stdcall exports $wantAdd and tbf_std_sub (only)" }
     if ($missing.Count -gt 0) { Fail "$($a.name): not exported: $($missing -join ', ')" } else { Write-Host "PASS $($a.name): all $($declared.Count) header functions exported" }
+
+    # tbfixture_ext.dll: its two defined functions and tbx_hidden (declared in no header) are
+    # exported; tbx_not_built (declared, not defined) is not (D-053).
+    cmd /c "`"$vc`" >nul 2>nul && dumpbin /nologo /exports `"$bin\tbfixture_ext.dll`" > `"$bin\exports_ext.txt`" 2>&1"
+    $extExported = @{}
+    Get-Content "$bin\exports_ext.txt" | ForEach-Object {
+        if ($_ -match '^\s+\d+\s+[0-9A-F]+\s+[0-9A-F]{8}\s+(\S+)') { $extExported[$Matches[1]] = $true }
+    }
+    $wantExt = 'tbx_hidden,tbx_scale_point,tbx_version'
+    $gotExt = (@($extExported.Keys) | Sort-Object) -join ','
+    if ($gotExt -eq $wantExt) { Write-Host "PASS $($a.name): tbfixture_ext.dll exports $wantExt (not tbx_not_built)" }
+    else { Fail "$($a.name): tbfixture_ext.dll exports $gotExt, expected $wantExt" }
 
     # Run the C tests.
     $testOut = & "$bin\test_tbfixture.exe" 2>&1

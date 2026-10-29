@@ -8,7 +8,7 @@ Module Harness
     Private Declare PtrSafe Function CoInitializeEx Lib "ole32" (ByVal pvReserved As LongPtr, ByVal dwCoInit As Long) As Long
     Private Declare PtrSafe Sub CoUninitialize Lib "ole32" ()
     Private Const COINIT_MULTITHREADED As Long = 0
-    Private Const GROUPS As Long = 19
+    Private Const GROUPS As Long = 20
 
     Private mVisits As Long
     Private mNotified As Long
@@ -88,6 +88,7 @@ Module Harness
             Case 17: ExtraHeader
             Case 18: LibraryThreads
             Case 19: LibraryMemory
+            Case 20: SecondDll
         End Select
         Exit Sub
     failed:
@@ -231,19 +232,13 @@ Module Harness
         Results.Check "6.same_get returns a handle directly (same-name opaque alias)", same <> 0
         Results.CheckEq "6.same_check accepts that handle", tbf_same_check(same), 0
         Results.CheckEq "6.same_check rejects NULL", tbf_same_check(vbNullPtr), 1
-        Results.CheckEq "6.calling a declared-but-not-exported function raises an error (D-031)", CallNotExported(), "raised"
+        ' D-053 (replaces D-031's NOTE + run-time error): no declare, so the call cannot even compile
+        Results.Check "6.a declared-but-not-exported function gets no declare and is reported (D-053)", _
+            InStr(ReportText(), vbCrLf & "- tbf_not_exported: exported by no DLL; no declare generated" & vbCrLf) > 0
         Dim lt As tbf_late
         lt.value = 7
         Results.CheckEq "6.late_value (struct defined after its typedef, D-034)", tbf_late_value(lt), 7
     End Sub
-
-    Private Function CallNotExported() As String
-        On Error GoTo failed
-        Dim ignored As Long = tbf_not_exported()
-        Return "returned " & ignored
-    failed:
-        Return "raised"
-    End Function
 
     ' ---- 7. structs by value ------------------------------------------------------------------
     Private Sub StructsByValue()
@@ -553,6 +548,21 @@ Module Harness
     ' ---- 17. a header the entry header does not include, generated through --also (D-033) ----
     Private Sub ExtraHeader()
         Results.CheckEq "17.sys_answer (declared only in tbfixture_sys.h)", tbf_sys_answer(), 42
+    End Sub
+
+    ' ---- 20. a second DLL of the library (D-053): tbfixture_ext.h binds to tbfixture_ext.dll ----
+    Private Sub SecondDll()
+        Dim h As LongPtr = GetModuleHandleW(StrPtr("tbfixture_ext.dll"))
+        Results.Check "20.Load loaded tbfixture_ext.dll too", h <> 0
+        Dim buf As String = String$(1024, vbNullChar)
+        Dim n As Long = GetModuleFileNameW(h, StrPtr(buf), 1024)
+        Results.Check "20.from this architecture's subfolder", LCase$(Left$(buf, n)) Like "*\fixture-c\bin\" & Results.Arch() & "\tbfixture_ext.dll", Left$(buf, n)
+        Results.CheckEq "20.ext_version (Lib ""tbfixture_ext.dll"")", tbx_version(), 2
+        Dim p As TBF_POINT
+        p.x = 3
+        p.y = -4
+        tbx_scale_point p, 5
+        Results.Check "20.ext_scale_point takes tbfixture.h's TBF_POINT", p.x = 15 And p.y = -20, p.x & "," & p.y
     End Sub
 
     ' ---- 16. naming (renames, keywords) -------------------------------------------------------

@@ -165,7 +165,7 @@ Module Tests_Perf
         macros86.ScanLibrary inc
         t = Now64()
         Dim e As New Emitter
-        e.Init t64, t86, macros, "git2.dll", inc, "git2"
+        e.Init t64, t86, macros, Tests_Dlls.Named("git2.dll"), inc, "git2"
         e.UseX86Macros macros86
         Report "Emitter.Init (names: RegisterLibrary)", Ms(t)
         If FileSys.KindOf(work & "\preprocessed_x64.i") = FileSys.KIND_FILE Then

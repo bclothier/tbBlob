@@ -30,13 +30,13 @@ harness checks that claim against a real API; see `tests\harness-libgit2\COVERAG
 
 | # | Group | What it proves |
 |---|---|---|
-| 0 | Loading | The generated `tbfixture_Loader.Load(folder)` picks `win32\` or `win64\`; a missing folder raises an error naming the paths tried; `IsLoaded`, `LoadFile`; the loaded module is this architecture's DLL; `Lib "tbfixture.dll"` binds to it |
+| 0 | Loading | The generated `tbfixture_Loader.Load(folder)` (a two-DLL loader, D-053) picks `win32\` or `win64\`; a missing folder raises an error naming the paths tried; `IsLoaded`, `LoadFile`; the loaded module is this architecture's DLL; `Lib "tbfixture.dll"` binds to it |
 | 1 | Layout | Generated expectations match, and tB = MSVC for every row of `tbf_layout_table()`; the over-aligned `TBF_ALIGNED` has no tB layout and is in the report |
 | 2 | Scalars as arguments and fields | Every C scalar type (`char`, `signed`/`unsigned char`, `short`, `int`, `long`, `long long` and their unsigned forms, `float`, `double`, `_Bool`, `size_t`, `intptr_t`, `wchar_t`) passed by value (17 arguments in one call) and as struct fields filled by C and by tB; unsigned values with the top bit set as signed bit patterns |
 | 3 | Scalar returns | Each of those types as a return value |
 | 4 | Pointers | `int*` in/out; array by first element; fixed array parameter `int[4]`; `void*` NULL and non-NULL; struct pointer out; NULL for a `ByRef` struct parameter (`ByVal vbNullPtr`); returned `const T*` read with `RtlMoveMemory` |
 | 5 | Strings | UTF-8 in (`const char*`, non-ASCII) and out (static string), UTF-16 in (`StrPtr`) and out, `char**` out-parameter |
-| 6 | Opaque handles | Create through a `T**` out-parameter, use, free; free of NULL; a typedef name that differs from the struct name; a same-name typedef (`typedef struct X X`) returned directly from a function; a declared-but-not-exported function raises an error (D-031) |
+| 6 | Opaque handles | Create through a `T**` out-parameter, use, free; free of NULL; a typedef name that differs from the struct name; a same-name typedef (`typedef struct X X`) returned directly from a function; a declared-but-not-exported function gets no declare and is in the report (D-053; it was a declare that raised an error, D-031) |
 | 7 | Structs by value | 4, 8, 16 and 24-byte structs passed **and returned** by value (the ABI cases that differ between x86 and x64) |
 | 8 | Nested structs and arrays | Struct fields that are structs, `char[8]` and `double[3]` arrays; C-filled and tB-filled |
 | 9 | Callbacks | cdecl callback as a parameter; cdecl, stdcall and synthesized (unnamed function-pointer field) delegates stored in a struct; context/payload pointers; a non-zero return stops the C loop; NULL callbacks skipped by C; x86 stdcall export bound as decorated `_name@N` and as undecorated (`.def`) |
@@ -49,6 +49,7 @@ harness checks that claim against a real API; see `tests\harness-libgit2\COVERAG
 | 16 | Naming | Renamed enum values (collisions with a function and a struct), a struct named like an enum value, tB keywords as field and parameter names |
 | 17 | Extra header (`--also`, D-033) | A function declared only in `tbfixture_sys.h`, which `tbfixture.h` does not include (as `git2/sys/*.h` are not included by `git2.h`) |
 | 19 | Memory the library allocates and the caller frees | A returned `char*` read through its pointer and freed with the library's free function (`tbf_free`, NULL harmless); a `git_buf`-shaped struct filled by the library, read through `ptr`/`size`/`reserved`, disposed and zeroed (dispose twice harmless); an outstanding-allocation counter returns to its starting value, so nothing leaks |
+| 20 | A second DLL (D-053) | Generated from the DLL folders: `tbfixture_ext.h`'s functions bind to `tbfixture_ext.dll` by its export table; `Load(bin)` loaded it from this architecture's subfolder; `tbx_version` and `tbx_scale_point` (taking `tbfixture.h`'s `TBF_POINT`) called through the bindings. `tbx_not_built` (declared, not exported) has no declare; `tbx_hidden` (exported, in no header) is in the report |
 | 18 | Callbacks on the library's threads (D-045, D-046) | A cdecl callback invoked from threads the library creates: return value, context, module variable, on a different OS thread from `Main`; a `String`, a `New Collection` and a handled error there; a stop value crossing threads; 4 × 10,000 concurrent calls with an exact atomic count (an unsynchronised counter is reported and can lose updates); `CreateObject` failing without COM on that thread and working after `CoInitializeEx`. The unhandled-error case is not run: it blocks on a modal run-time error box (D-046; SPIKE-10 records it) |
 
 ## In the fixture but only compiled, not run

@@ -3,7 +3,7 @@
 ## Synopsis
 
 ```
-tbBlob <header folder> <entry header> <dll name> <output folder> [options]
+tbBlob <header folder> <entry header> <dll> <output folder> [options]
 tbBlob --check [--castxml <path>]
 tbBlob --self-test [--integration]
 tbBlob --help
@@ -15,18 +15,20 @@ tbBlob --help
 |---|---|
 | `<header folder>` | The folder that holds the library's headers. Declarations in headers under this folder belong to the library and are generated; everything else (Windows SDK, C runtime) is only used to understand them. |
 | `<entry header>` | The header to start from, relative to the header folder, usually the one an application includes (`git2.h`, `zlib.h`). Headers it includes are followed. |
-| `<dll name>` | The DLL every `Declare` binds to (`Lib "git2.dll"`). Use the file name, not a path. |
+| `<dll>` | The library's x64 DLL file, or a folder of DLLs (each `*.dll` directly in it). tbBlob reads the export tables and binds each function to the DLL that exports it (`Lib "<file name>"`); a function no DLL exports gets no declare and is listed in the report. Other libraries' DLLs in the folder do no harm: only the library's functions are looked up. A function that two DLLs export stops the run; settle it with `--dll`. A name that is no file or folder here (`mylib.dll` when generating where the DLL isn't) binds every function to that name and checks nothing. |
 | `<output folder>` | Where `report.md`, `Source\` and `Work\` are written. It is created if needed. `Source\` is emptied first, so modules of removed headers don't linger. |
 
 ## Options
 
 | Option | Meaning |
 |---|---|
-| `--name <name>` | Project name, used for the `<name>_LayoutCheck` and `<name>_Loader` modules and in the report. Default: the DLL name without its extension. |
+| `--name <name>` | Project name, used for the `<name>_LayoutCheck` and `<name>_Loader` modules and in the report. Default: the DLL name without its extension; for a folder of DLLs, the entry header's name without its extension (`cairo.h` gives `cairo`). |
 | `-I <folder>` | An extra include folder for CastXML (repeatable), for headers the library includes from outside its own folder. |
 | `-D <name[=value]>` | A preprocessor define for CastXML (repeatable). Use it to pick configuration macros, or to supply something the headers expect the compiler to define (see the libgit2 example). |
 | `--also <header>` | Another header to generate from, relative to the header folder (repeatable). Use it for headers the entry header doesn't include, such as libgit2's `git2/sys/*.h`. tbBlob writes `Work\tbblob_entry.h`, which includes the entry header and each `--also` header. |
-| `--x86-dll <path>` | The library's **x86** DLL. Its export table decides, per `__stdcall` function, whether x86 binds the plain name or the decorated `_name@N`, and it flags header functions the DLL doesn't export. Recommended whenever you have the x86 DLL. |
+| `--x86-dll <path>` | The library's **x86** DLL, or a folder of them. The export table of each function's x86 DLL (same file name) decides, per `__stdcall` function, whether x86 binds the plain name or the decorated `_name@N`, and flags functions the x86 DLL doesn't export. Recommended whenever you have the x86 DLLs. |
+| `--dll <f>=<dll>` | Binds function `<f>`, or every function of header `<f>` (a name ending in `.h`), to `<dll>`, one of the DLLs read from `<dll>` (repeatable). Needed for a function more than one DLL exports. It binds `<f>` even if that DLL doesn't export it; the declare then gets a `NOTE` and the report lists it. |
+| `--keep-unexported` | Declare the functions no DLL exports anyway, instead of skipping them: each binds to the DLL most of its header's other functions bind to (or the only DLL, when there is one), with a `NOTE` above the declare, and the report lists it. For a DLL that exports more at run time than the one you generate against, or exports by ordinal only. A function this can't place is still skipped, and the report names `--dll` as the fix. |
 | `--castxml <path>` | The `castxml.exe` to use. Default: the `CASTXML` environment variable, then `castxml\bin\castxml.exe` next to `tbBlob.exe`, then `PATH`. |
 | `--check` | Check every dependency (CastXML, its resource headers, Visual Studio with the C++ tools, the Windows SDK through a real compile probe for x86 and x64, MSXML 6). Prints `OK`, `MISSING` (with the fix) or `SKIPPED` for each, then exits: 0 if all are OK, 4 otherwise. See [SETUP.md](SETUP.md#checking-a-machine-tbblob---check). |
 | `--self-test` | Run tbBlob's built-in tests. `--integration` adds the tests that need CastXML, MSVC and the repository's test files. For development, not normal use. |
@@ -39,7 +41,7 @@ tbBlob --help
 | 0 | Done | Read `report.md` |
 | 1 | Generation failed. The message names the item and header it was working on, or the x86/x64 disagreement | Usually a header problem: see [Troubleshooting](SETUP.md#troubleshooting) |
 | 2 | A mistake on the command line | The message says which; the usage follows |
-| 3 | The header folder, the entry header or an `--also` header does not exist | Check the paths (`--also` and the entry header are relative to the header folder) |
+| 3 | The header folder, the entry header, an `--also` header or `--x86-dll` does not exist | Check the paths (`--also` and the entry header are relative to the header folder) |
 | 4 | A required tool or file was not found: CastXML, its resource headers, Visual Studio with the C++ tools, the Windows SDK | The run prints the full dependency checklist after the error, the same as `tbBlob --check`, with the fix for each problem |
 
 ## Examples
@@ -50,11 +52,29 @@ tbBlob --help
 tbBlob C:\libs\mylib\include mylib.h mylib.dll C:\out\mylib
 ```
 
+**Give the DLL itself.** Then tbBlob reads its export table: a header function the DLL doesn't
+export gets no declare, and the report lists that and any export no header declares:
+```
+tbBlob C:\libs\mylib\include mylib.h C:\libs\mylib\bin\x64\mylib.dll C:\out\mylib
+```
+
 **Pass the x86 DLL as well.** Do this when you have it. It decides how `__stdcall` exports are bound
-on x86 and lists any header function the DLL doesn't export:
+on x86 and flags any function the x86 DLL doesn't export:
 ```
-tbBlob C:\libs\mylib\include mylib.h mylib.dll C:\out\mylib --x86-dll C:\libs\mylib\bin\x86\mylib.dll
+tbBlob C:\libs\mylib\include mylib.h C:\libs\mylib\bin\x64\mylib.dll C:\out\mylib --x86-dll C:\libs\mylib\bin\x86\mylib.dll
 ```
+
+**A library with several DLLs.** Give the folder: each function binds to the DLL that exports it.
+cairo's script interpreter is in `cairo-script-interpreter-2.dll`, the rest in `cairo-2.dll`;
+vcpkg's `bin` also holds FreeType, zlib and others, which do no harm:
+```
+set CAIRO=C:\vcpkg\installed\x64-windows
+tbBlob %CAIRO%\include\cairo cairo.h %CAIRO%\bin C:\out\cairo -I %CAIRO%\include ^
+    --also cairo-script-interpreter.h --also cairo-pdf.h --also cairo-svg.h
+```
+The project is named `cairo` (after the entry header), and `cairo_Loader.Load(folder)` loads both
+DLLs. Were a function exported by two of the DLLs, the run would stop and name them;
+`--dll cairo_foo=cairo-2.dll` (or `--dll cairo-ft.h=cairo-2.dll` for a whole header) settles it.
 
 **Configuration macros and an extra include folder:**
 ```
@@ -65,8 +85,8 @@ tbBlob C:\libs\mylib\include mylib.h mylib.dll C:\out\mylib -D MYLIB_ENABLE_THRE
 uses `ssize_t`, which MSVC doesn't define, hence the `-D`:
 ```
 set INC=C:\vcpkg\installed\x64-windows\include
-tbBlob %INC% git2.h git2.dll C:\out\git2 ^
-    --x86-dll C:\vcpkg\installed\x86-windows\bin\git2.dll ^
+tbBlob %INC% git2.h C:\vcpkg\installed\x64-windows\bin C:\out\git2 ^
+    --x86-dll C:\vcpkg\installed\x86-windows\bin ^
     -D ssize_t=intptr_t ^
     --also git2\sys\alloc.h --also git2\sys\commit.h --also git2\sys\errors.h
 ```
@@ -85,8 +105,8 @@ tbBlob --check --castxml D:\tools\castxml\bin\castxml.exe
 ```
 
 A run prints one progress line per stage, then a summary such as
-`tbBlob: done: 89 modules, 960 functions, 108 types, 91 enums, 164 delegates, 248 constants (178 macros skipped)`.
-libgit2 with its `sys` headers (960 functions) takes about 35 seconds on a 2-core machine, about 30 s
+`tbBlob: done: 89 modules, 951 functions, 108 types, 91 enums, 164 delegates, 248 constants (178 macros skipped)`.
+libgit2 with its `sys` headers (951 functions) takes about 35 seconds on a 2-core machine, about 30 s
 of it the four CastXML passes and about 5 s tbBlob's own work.
 
 ## The output folder
@@ -97,7 +117,7 @@ of it the four CastXML passes and about 5 s tbBlob's own work.
   Source\
     <module>.twin            one module per header: git2/repository.h -> git2_repository.twin
     <name>_LayoutCheck.twin  LayoutMismatches() and TbLayout(record, member): check the layout at run time
-    <name>_Loader.twin       optional: load the DLL from a folder you choose
+    <name>_Loader.twin       optional: load the DLL (or every DLL) from a folder you choose
   Work\
     castxml_x86.cmd / .xml   CastXML's view of the headers as the x86 compiler sees them
     castxml_x64.cmd / .xml   ... and as the x64 compiler sees them
@@ -111,8 +131,8 @@ something fails. Generation is deterministic: the same inputs give byte-identica
 
 ## The report
 
-`report.md` starts with counts, then a section on loading the DLL, then one section per kind of
-finding. Each entry gives its reason:
+`report.md` starts with counts, then the DLLs (each with its function count) and a section on
+loading them, then one section per kind of finding. Each entry gives its reason:
 
 | Section | What it lists |
 |---|---|
@@ -123,7 +143,8 @@ finding. Each entry gives its reason:
 | Structs passed or returned by value | Functions that do this (supported, listed for awareness) |
 | Variadic functions | Functions with `...` (see below) |
 | stdcall functions | How each x86 `__stdcall` function is bound |
-| Declared but not exported | Header functions the DLL doesn't export: calling one fails at run time |
+| Declared but not exported | Header functions no DLL exports: they get no declare, unless `--keep-unexported` or `--dll` binds them (then the declare has a `NOTE`). With a bare DLL name, functions the `--x86-dll` doesn't export: their declare has a `NOTE`, and calling one fails on x86 |
+| Exported but not declared | Per DLL, exports no library header declares: a header left out (add it with `--also`), a C++-only header, or an internal export |
 | Architecture-dependent constants | Constants emitted as `#If Win64` pairs, with both values |
 | Packing | `#pragma pack` structs (`[PackingAlignment(n)]`), and over-aligned structs tB can't express |
 | Unions | Unions and their storage |
@@ -180,7 +201,9 @@ finding. Each entry gives its reason:
   `<name>_Loader.Load(folder)` before the first call. It loads `folder\win32\<dll>` or
   `folder\win64\<dll>` (matching the running code) if that file exists, otherwise
   `folder\<dll>`, and the DLL's own dependencies load from its folder. `<name>_Loader.LoadFile(path)`
-  loads one full path; `<name>_Loader.IsLoaded()` tells you whether it is loaded.
+  loads one full path; `<name>_Loader.IsLoaded()` tells you whether it is loaded. When the functions
+  bind to several DLLs, `Load(folder)` loads each of them the same way, in the order the report's DLLs
+  section lists them, `LoadFile` is called once per DLL, and `IsLoaded()` is True when all are loaded.
 
 Your program needs only the library's DLL at run time. tbBlob, CastXML and Visual Studio are needed
 only to generate.

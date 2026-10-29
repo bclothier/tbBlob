@@ -1,0 +1,429 @@
+' Tests for binding each function to the DLL whose export table has it (task 26.0, D-053):
+' DllSet built from in-memory export lists, the emitter and pipeline with several DLLs, the
+' --dll / --x86-dll command line, and (integration) the fixture's two real DLLs.
+Module Tests_Dlls
+    Public Const MODULE_ID As Long = 12
+
+    Public Sub Register()
+        SelfTest.Add "dlls: each function binds to the DLL whose exports have it; none when no DLL does", MODULE_ID, 1
+        SelfTest.Add "dlls: a function two DLLs export is ambiguous; --dll by function or header settles it", MODULE_ID, 2
+        SelfTest.Add "dlls: a --dll value without = or naming a DLL that was not read is an error", MODULE_ID, 3
+        SelfTest.Add "dlls: a bare name binds every function to it and checks nothing", MODULE_ID, 4
+        SelfTest.Add "dlls: exports no header declares, per DLL; x86 exports per DLL", MODULE_ID, 5
+        SelfTest.Add "dlls: a folder without DLLs and a .dll that is not a PE file are errors", MODULE_ID, 6
+        SelfTest.Add "emit: each declare names its DLL; a function no DLL exports gets no declare and is reported", MODULE_ID, 7
+        SelfTest.Add "emit: x86 __stdcall decoration is decided by that function's own DLL (D-026)", MODULE_ID, 8
+        SelfTest.Add "emit: bare-name output is byte-identical to the snapshot from before D-053", MODULE_ID, 9
+        SelfTest.Add "emit: a two-DLL project's loader loads each DLL in order; IsLoaded checks all; the report explains it", MODULE_ID, 10
+        SelfTest.Add "pipeline: a function two DLLs export stops generation (nothing written) naming both and --dll; --dll settles it", MODULE_ID, 11
+        SelfTest.Add "cli: --dll repeats; without = it is a usage error; a missing --x86-dll exits 3", MODULE_ID, 12
+        SelfTest.Add "cli: with a folder of DLLs and no --name, the project is named after the entry header (D-062)", MODULE_ID, 13
+        SelfTest.Add "dlls: the fixture's two real DLLs, x64 and x86, read from their bin folders", MODULE_ID, 14, True
+        SelfTest.Add "end-to-end: <dll> = bin\win64 and --also tbfixture_ext.h bind both DLLs and report what is skipped or undeclared", MODULE_ID, 15, True
+        SelfTest.Add "dlls: --keep-unexported falls back to the DLL most of the header binds to, else the only DLL, else none (D-062)", MODULE_ID, 16
+        SelfTest.Add "emit: --keep-unexported and --dll declare a function no DLL exports, with a NOTE, and report it (D-062)", MODULE_ID, 17
+        SelfTest.Add "cli: --keep-unexported parses; off by default", MODULE_ID, 18
+    End Sub
+
+    Public Sub RunTest(ByVal index As Long)
+        Select Case index
+            Case 1: BindsByExports
+            Case 2: AmbiguousAndOverrides
+            Case 3: OverrideErrors
+            Case 4: BareName
+            Case 5: UndeclaredAndX86
+            Case 6: LoadErrors
+            Case 7: EmitBinds
+            Case 8: EmitX86PerDll
+            Case 9: BareSnapshot
+            Case 10: TwoDllLoader
+            Case 11: PipelineAmbiguity
+            Case 12: CliDllOptions
+            Case 13: ProjectNameFromHeader
+            Case 14: RealDlls
+            Case 15: EndToEndTwoDlls
+            Case 16: FallbackRules
+            Case 17: EmitKeepUnexported
+            Case 18: CliKeepUnexported
+            Case Else: Err.Raise SelfTest.CHECK_FAILED, , "no test " & index & " in Tests_Dlls"
+        End Select
+    End Sub
+
+    ' ---- helpers (also used by other test modules) -----------------------------------------
+
+    ' A DllSet in bare-name mode: every function binds to name, nothing checked.
+    Public Function Named(ByVal name As String) As DllSet
+        Dim d As New DllSet
+        d.UseName name
+        Return d
+    End Function
+
+    ' A keyed set of the names in "a|b|c" (case-sensitive, as export names are).
+    Public Function NameSet(ByVal names As String) As Collection
+        Dim c As New Collection, nm As Variant
+        c.KeyCompareMode = vbBinaryCompare
+        If Len(names) = 0 Then Return c
+        For Each nm In Split(names, "|")
+            If Not c.Exists(CStr(nm)) Then c.Add True, CStr(nm)
+        Next
+        Return c
+    End Function
+
+    ' The fixture's x64 function names, except those in "a|b".
+    Private Function FixtureNamesExcept(ByVal skip As String) As Collection
+        Dim m As New CxModel
+        m.Load SelfTest.Fixture("tbfixture_x64.xml"), SelfTest.RepoRoot() & "\tests\fixture-c"
+        Dim c As New Collection, el As Object, nm As String
+        c.KeyCompareMode = vbBinaryCompare
+        For Each el In m.Functions()
+            nm = m.Attr(el, "name")
+            If InStr("|" & skip & "|", "|" & nm & "|") = 0 Then c.Add True, nm
+        Next
+        Return c
+    End Function
+
+    Private Function Joined(c As Collection) As String
+        Dim v As Variant, s As String
+        For Each v In c
+            s &= v & "|"
+        Next
+        Return s
+    End Function
+
+    ' The text contains this exact line (or consecutive lines joined with vbCrLf).
+    Private Sub HasLine(ByVal text As String, ByVal what As String, ByVal lineText As String)
+        SelfTest.AssertTrue what, InStr(text, vbCrLf & lineText & vbCrLf) > 0, "missing line(s): [" & Replace(lineText, vbCrLf, " \n ") & "]"
+    End Sub
+
+    Private Function Cli(ByVal joined As String, ByRef output As String) As Long
+        Dim args() As String = Split(joined, "|")  ' Split returns a Variant; Run wants a String() ByRef
+        Console.StartCapture
+        Dim code As Long = MainModule.Run(args)
+        output = Console.StopCapture()
+        Return code
+    End Function
+
+    Private Function FileNames(ByVal folder As String) As String
+        If FileSys.KindOf(folder) <> FileSys.KIND_FOLDER Then Return "(none)"
+        Dim n() As String, c As Long, i As Long, s As String
+        c = FileSys.ListNames(folder, n)
+        TextKit.SortOrdinal n, c
+        For i = 0 To c - 1
+            s &= n(i) & ";"
+        Next
+        Return s
+    End Function
+
+    Private Function Snap(ByVal file As String) As String
+        Return SelfTest.Fixture(file)
+    End Function
+
+    ' ---- DllSet ------------------------------------------------------------------------------
+
+    Private Sub BindsByExports()
+        Dim d As New DllSet
+        d.AddExports "tbfixture.dll", NameSet("tbf_ret_int|tbf_std_add"), Nothing
+        d.AddExports "tbfixture_ext.dll", NameSet("tbx_version|tbx_scale_point|tbx_hidden"), Nothing
+        SelfTest.AssertTrue "checked", d.Checked()
+        SelfTest.AssertEq "ext function", d.DllFor("tbx_version"), "tbfixture_ext.dll"
+        SelfTest.AssertEq "main function", d.DllFor("tbf_ret_int"), "tbfixture.dll"
+        SelfTest.AssertEq "exported by none", d.DllFor("tbx_not_built"), ""
+        SelfTest.AssertEq "case-sensitive names", d.DllFor("TBX_VERSION"), ""
+        SelfTest.AssertEq "DLLs in the order functions first bound to them", Joined(d.DllNames()), "tbfixture_ext.dll|tbfixture.dll|"
+        SelfTest.AssertEq "nothing ambiguous", d.Ambiguous().Count, 0
+    End Sub
+
+    Private Function TwoExportingF() As DllSet
+        Dim d As New DllSet
+        d.AddExports "a.dll", NameSet("f|g"), Nothing
+        d.AddExports "b.dll", NameSet("f"), Nothing
+        Return d
+    End Function
+
+    Private Sub AmbiguousAndOverrides()
+        Dim d As DllSet = TwoExportingF()
+        SelfTest.AssertEq "binds to the first", d.DllFor("f"), "a.dll"
+        SelfTest.AssertEq "binds to the first again", d.DllFor("f"), "a.dll"
+        SelfTest.AssertEq "recorded once", Joined(d.Ambiguous()), "f: a.dll, b.dll|"
+        SelfTest.AssertEq "g is not ambiguous", d.DllFor("g"), "a.dll"
+
+        Dim byName As DllSet = TwoExportingF()
+        SelfTest.AssertEq "override accepted", byName.AddOverride("f=B.DLL"), ""
+        SelfTest.AssertEq "--dll f=B.DLL (spelled as read)", byName.DllFor("f"), "b.dll"
+        SelfTest.AssertEq "settled: not ambiguous", byName.Ambiguous().Count, 0
+
+        Dim byHeader As DllSet = TwoExportingF()
+        SelfTest.AssertEq "header override accepted", byHeader.AddOverride("sub/x.h=b.dll"), ""
+        SelfTest.AssertEq "--dll x.h=b.dll, function from x.h", byHeader.DllFor("f", "C:\inc\X.h"), "b.dll"
+        SelfTest.AssertEq "function from another header", byHeader.DllFor("g", "C:\inc\y.h"), "a.dll"
+        SelfTest.AssertEq "header override settles it", byHeader.Ambiguous().Count, 0
+    End Sub
+
+    Private Sub OverrideErrors()
+        Dim d As DllSet = TwoExportingF()
+        SelfTest.AssertTrue "no =", InStr(d.AddOverride("f"), "expected <function or header>=<dll file name>") > 0, d.AddOverride("f")
+        SelfTest.AssertTrue "no key", InStr(d.AddOverride("=a.dll"), "expected") > 0, d.AddOverride("=a.dll")
+        SelfTest.AssertTrue "no DLL", InStr(d.AddOverride("f="), "expected") > 0, d.AddOverride("f=")
+        SelfTest.AssertEq "a DLL that was not read", d.AddOverride("f=c.dll"), "--dll f=c.dll: c.dll is not one of the DLLs (a.dll, b.dll)"
+        Dim problem As String = d.Load("a.dll", "", NameSet("f=c.dll"))
+        SelfTest.AssertTrue "Load reports a bad override", InStr(problem, "--dll") > 0, problem
+    End Sub
+
+    Private Sub BareName()
+        Dim d As DllSet = Named("x.dll")
+        SelfTest.AssertTrue "not checked", Not d.Checked()
+        SelfTest.AssertEq "any function", d.DllFor("anything"), "x.dll"
+        SelfTest.AssertEq "one DLL", Joined(d.DllNames()), "x.dll|"
+        SelfTest.AssertEq "nothing undeclared", d.ExportedNotDeclared("x.dll", NameSet("")).Count, 0
+        SelfTest.AssertTrue "no x86 exports", d.X86Exports("x.dll") Is Nothing
+        Dim loaded As New DllSet
+        SelfTest.AssertEq "Load of a name that is no file or folder", loaded.Load("C:\no-such\x.dll", "", New Collection), ""
+        SelfTest.AssertEq "binds to the name as given", loaded.DllFor("f"), "C:\no-such\x.dll"
+    End Sub
+
+    Private Sub UndeclaredAndX86()
+        Dim d As New DllSet
+        d.AddExports "tbfixture_ext.dll", NameSet("tbx_version|tbx_hidden|tbx_scale_point"), NameSet("_tbx_std@4")
+        SelfTest.AssertEq "exported but not declared", Joined(d.ExportedNotDeclared("tbfixture_ext.dll", NameSet("tbx_version|tbx_scale_point"))), "tbx_hidden|"
+        SelfTest.AssertTrue "x86 exports by DLL name, any case", d.X86Exports("TBFIXTURE_EXT.DLL").Exists("_tbx_std@4")
+        SelfTest.AssertTrue "no x86 exports for another DLL", d.X86Exports("tbfixture.dll") Is Nothing
+    End Sub
+
+    Private Sub LoadErrors()
+        Dim t As String = SelfTest.NewTempFolder()
+        FileSys.MakeDirs t & "\empty"
+        FileSys.WriteTextUtf8 t & "\empty\readme.txt", "x"
+        FileSys.MakeDirs t & "\bad"
+        FileSys.WriteTextUtf8 t & "\bad\fake.dll", "not a PE file"
+        Dim d1 As New DllSet, d2 As New DllSet
+        Dim noDll As String = d1.Load(t & "\empty", "", New Collection)
+        Dim notPe As String = d2.Load(t & "\bad", "", New Collection)
+        FileSys.RemovePath t
+        SelfTest.AssertTrue "folder without DLLs", InStr(noDll, "no DLL in ") > 0, noDll
+        SelfTest.AssertTrue "not a PE file names it", InStr(notPe, "cannot read the exports of ") > 0 And InStr(notPe, "fake.dll") > 0, notPe
+    End Sub
+
+    ' ---- emitter and pipeline ----------------------------------------------------------------
+
+    ' tbf_ret_int in other.dll (with tbx_hidden, which no header declares), every other fixture
+    ' function but tbf_not_exported in tbfixture.dll.
+    Private Function SplitFixture() As DllSet
+        Dim d As New DllSet
+        d.AddExports "tbfixture.dll", FixtureNamesExcept("tbf_ret_int|tbf_not_exported"), Nothing
+        d.AddExports "other.dll", NameSet("tbf_ret_int|tbx_hidden"), Nothing
+        Return d
+    End Function
+
+    Private Sub EmitBinds()
+        Dim e As Emitter = Tests_Emitter.BuiltWith(SplitFixture())
+        Dim t As String = e.ModuleText("tbfixture")
+        HasLine t, "bound to the DLL that exports it", "    Public DeclareWide PtrSafe Function tbf_ret_int CDecl Lib ""other.dll"" () As Long"
+        HasLine t, "the others to theirs", "    Public DeclareWide PtrSafe Function tbf_inc_int CDecl Lib ""tbfixture.dll"" ( _"
+        SelfTest.AssertTrue "no declare for a function no DLL exports", InStr(t, "tbf_not_exported") = 0
+        Dim r As String = e.ReportText()
+        HasLine r, "skipped and reported", "- tbf_not_exported: exported by no DLL; no declare generated"
+        HasLine r, "functions counted without it", "- functions: 88"
+        HasLine r, "DLLs section", "## DLLs"
+        HasLine r, "per-DLL count", "- tbfixture.dll: 87 functions"
+        HasLine r, "singular", "- other.dll: 1 function"
+        HasLine r, "exported but not declared", "## Exported but not declared" & vbCrLf & "- other.dll: tbx_hidden"
+    End Sub
+
+    Private Sub EmitX86PerDll()
+        Dim d As New DllSet
+        d.AddExports "tbfixture.dll", FixtureNamesExcept("tbf_std_add"), Nothing
+        d.AddExports "std.dll", NameSet("tbf_std_add"), NameSet("_tbf_std_add@8")
+        Dim e As Emitter = Tests_Emitter.BuiltWith(d)
+        Dim t As String = e.ModuleText("tbfixture")
+        HasLine t, "decorated on x86 in its own DLL", "    #If Win64 Then" & vbCrLf & _
+            "    Public DeclareWide PtrSafe Function tbf_std_add Lib ""std.dll"" ( _" & vbCrLf & _
+            "        ByVal a As Long, _" & vbCrLf & "        ByVal b As Long _" & vbCrLf & "    ) As Long" & vbCrLf & _
+            "    #Else" & vbCrLf & _
+            "    Public DeclareWide PtrSafe Function tbf_std_add Lib ""std.dll"" Alias ""_tbf_std_add@8"" ( _"
+        Dim r As String = e.ReportText()
+        HasLine r, "reported as bound", "- tbf_std_add: stdcall; bound on x86 as _tbf_std_add@8 (D-026)"
+        HasLine r, "a DLL without x86 exports is not checked", "- tbf_std_sub: stdcall; x86 export name not checked: generate with --x86-dll <x86 DLL> to bind it if it is exported as _tbf_std_sub@8 (D-026)"
+    End Sub
+
+    Private Sub BareSnapshot()
+        Dim e As Emitter = Tests_Emitter.BuiltWith(Named("tbfixture.dll"))
+        Dim snap As String = SelfTest.RepoRoot() & "\tests\testdata\emitter-bare\"
+        SelfTest.AssertTrue "tbfixture.twin", e.ModuleText("tbfixture") = FileSys.ReadTextUtf8(snap & "tbfixture.twin"), "differs from " & snap & "tbfixture.twin"
+        SelfTest.AssertTrue "layout module", e.LayoutModuleText() = FileSys.ReadTextUtf8(snap & "tbfixture_LayoutCheck.twin"), "differs"
+        SelfTest.AssertTrue "loader module", e.LoaderModuleText() = FileSys.ReadTextUtf8(snap & "tbfixture_Loader.twin"), "differs"
+        HasLine e.ReportText(), "DLLs section says it was not checked", "- tbfixture.dll: 89 functions (not checked: no such DLL file or folder, so every function binds to this name)"
+    End Sub
+
+    Private Sub TwoDllLoader()
+        Dim d As DllSet = SplitFixture()
+        Dim e As Emitter = Tests_Emitter.BuiltWith(d)
+        Dim names As Collection = d.DllNames()
+        Dim order As String = """" & names(1) & """, """ & names(2) & """"
+        Dim t As String = e.LoaderModuleText()
+        HasLine t, "both DLLs, in binding order", "        Return Array(" & order & ")"
+        HasLine t, "Load loads each", "            h = LoadOne(folder, names(i))"
+        HasLine t, "each from the arch folder first", "        Dim archPath As String = folder & ""\"" & ARCH_DIR & ""\"" & dllName"
+        HasLine t, "error names the DLL", "        Err.Raise LOAD_FAILED, , ""cannot load "" & dllName & "": tried "" & tried"
+        HasLine t, "IsLoaded checks every DLL", "            If GetModuleHandleW(StrPtr(n)) = 0 Then Return False"
+        SelfTest.AssertTrue "no single DLL_NAME", InStr(t, "DLL_NAME") = 0
+        Dim r As String = e.ReportText()
+        HasLine r, "report section", "## Loading the DLLs"
+    End Sub
+
+    Private Sub PipelineAmbiguity()
+        Dim t As String = SelfTest.NewTempFolder()
+        Dim d As New DllSet
+        d.AddExports "a.dll", FixtureNamesExcept(""), Nothing
+        d.AddExports "b.dll", NameSet("tbf_ret_int"), Nothing
+        Console.StartCapture
+        Dim code As Long = Pipeline.GenerateFrom(Snap("tbfixture_x86.xml"), Snap("tbfixture_x64.xml"), Snap("tbfixture_macros_x86.txt"), Snap("tbfixture_macros_x64.txt"), Snap("tbfixture_x64.i"), _
+            SelfTest.RepoRoot() & "\tests\fixture-c", d, "tbfixture", t & "\out")
+        Dim ignored As String = Console.StopCapture()
+        Dim written As String = FileNames(t & "\out")
+        Dim lastError As String = Pipeline.LastError
+
+        Dim settled As New DllSet
+        settled.AddExports "a.dll", FixtureNamesExcept(""), Nothing
+        settled.AddExports "b.dll", NameSet("tbf_ret_int"), Nothing
+        settled.AddOverride "tbf_ret_int=b.dll"
+        Console.StartCapture
+        Dim code2 As Long = Pipeline.GenerateFrom(Snap("tbfixture_x86.xml"), Snap("tbfixture_x64.xml"), Snap("tbfixture_macros_x86.txt"), Snap("tbfixture_macros_x64.txt"), Snap("tbfixture_x64.i"), _
+            SelfTest.RepoRoot() & "\tests\fixture-c", settled, "tbfixture", t & "\out2")
+        ignored = Console.StopCapture()
+        Dim src As String
+        If code2 = 0 Then src = FileSys.ReadTextUtf8(t & "\out2\Source\tbfixture.twin")
+        FileSys.RemovePath t
+
+        SelfTest.AssertEq "exit code", code, MainModule.EXIT_FAILED
+        SelfTest.AssertTrue "names the function and both DLLs", InStr(lastError, "tbf_ret_int: a.dll, b.dll") > 0, lastError
+        SelfTest.AssertTrue "says how to settle it", InStr(lastError, "--dll <function or header>=<dll file name>") > 0, lastError
+        SelfTest.AssertTrue "nothing written", written = "(none)" Or written = "", "written=[" & written & "]"
+        SelfTest.AssertEq "settled: exit code", code2, 0
+        SelfTest.AssertTrue "settled: bound to b.dll", InStr(src, "tbf_ret_int CDecl Lib ""b.dll""") > 0, "length " & Len(src)
+    End Sub
+
+    ' ---- command line -----------------------------------------------------------------------
+
+    Private Sub CliDllOptions()
+        Dim o As New CliOptions
+        Dim args() As String = Split("C:\h|a.h|C:\bin|C:\o|--dll|tbx_version=tbfixture_ext.dll|--dll|cairo-ft.h=cairo-2.dll", "|")
+        SelfTest.AssertEq "parses", o.Parse(args), ""
+        SelfTest.AssertEq "repeats", Joined(o.DllOverrides), "tbx_version=tbfixture_ext.dll|cairo-ft.h=cairo-2.dll|"
+        Dim bad As New CliOptions
+        Dim badArgs() As String = Split("C:\h|a.h|a.dll|C:\o|--dll|tbx_version", "|")
+        SelfTest.AssertTrue "without =", InStr(bad.Parse(badArgs), "--dll needs <function or header>=<dll file name>") > 0, bad.Parse(badArgs)
+
+        Dim out As String
+        Dim code As Long = Cli(SelfTest.RepoRoot() & "\tests\fixture-c|tbfixture.h|tbfixture.dll|C:\no-such\out|--dll|tbx_version", out)
+        SelfTest.AssertEq "usage error exits 2", code, MainModule.EXIT_USAGE
+        code = Cli(SelfTest.RepoRoot() & "\tests\fixture-c|tbfixture.h|tbfixture.dll|C:\no-such\out|--x86-dll|C:\no-such\x86", out)
+        SelfTest.AssertEq "missing --x86-dll exits 3", code, MainModule.EXIT_MISSING_PATH
+        SelfTest.AssertTrue "and names it", InStr(out, "--x86-dll not found: C:\no-such\x86") > 0, out
+    End Sub
+
+    Private Sub ProjectNameFromHeader()
+        Dim t As String = SelfTest.NewTempFolder()
+        Dim folder As New CliOptions, named As New CliOptions, file As New CliOptions
+        Dim a1() As String = Split("C:\h|cairo.h|" & t & "|C:\o", "|")
+        Dim a2() As String = Split("C:\h|cairo.h|" & t & "|C:\o|--name|mine", "|")
+        Dim a3() As String = Split("C:\h|cairo.h|C:\no-such\cairo-2.dll|C:\o", "|")
+        folder.Parse a1
+        folder.ApplyDiskDefaults
+        named.Parse a2
+        named.ApplyDiskDefaults
+        file.Parse a3
+        file.ApplyDiskDefaults
+        FileSys.RemovePath t
+        SelfTest.AssertEq "folder: the entry header's name", folder.ProjectName, "cairo"
+        SelfTest.AssertEq "--name wins", named.ProjectName, "mine"
+        SelfTest.AssertEq "a DLL name: the DLL's name", file.ProjectName, "cairo-2"
+    End Sub
+
+    ' ---- --keep-unexported (D-062) ----------------------------------------------------------
+
+    Private Sub FallbackRules()
+        Dim d As New DllSet
+        d.AddExports "a.dll", NameSet("a1|a2"), Nothing
+        d.AddExports "b.dll", NameSet("b1"), Nothing
+        d.DllFor "a1", "C:\inc\x.h"
+        d.DllFor "a2", "C:\inc\x.h"
+        d.DllFor "b1", "C:\inc\X.h"
+        SelfTest.AssertEq "the DLL most of its header binds to", d.FallbackFor("x_missing", "C:\inc\x.h"), "a.dll"
+        SelfTest.AssertEq "no function of its header bound, two DLLs: none", d.FallbackFor("y_missing", "C:\inc\y.h"), ""
+        Dim one As New DllSet
+        one.AddExports "only.dll", NameSet("f"), Nothing
+        SelfTest.AssertEq "the only DLL", one.FallbackFor("g", "C:\inc\z.h"), "only.dll"
+        SelfTest.AssertTrue "Exports, any case of the DLL name", d.Exports("A.DLL", "a1") And Not d.Exports("a.dll", "b1")
+        SelfTest.AssertTrue "bare-name mode: everything counts as exported", Named("x.dll").Exports("x.dll", "anything")
+    End Sub
+
+    Private Sub EmitKeepUnexported()
+        Dim d As DllSet = SplitFixture()
+        d.KeepUnexported = True
+        Dim e As Emitter = Tests_Emitter.BuiltWith(d)
+        HasLine e.ModuleText("tbfixture"), "declared with a NOTE, bound to its header's DLL", _
+            "    ' NOTE: not exported by tbfixture.dll (declared because of --keep-unexported): a call fails at run time unless the DLL loaded then exports it" & vbCrLf & _
+            "    Public DeclareWide PtrSafe Function tbf_not_exported CDecl Lib ""tbfixture.dll"" () As Long"
+        Dim r As String = e.ReportText()
+        HasLine r, "reported", "- tbf_not_exported: not exported by tbfixture.dll; declared anyway (--keep-unexported)"
+        HasLine r, "counted", "- functions: 89"
+        Dim o As DllSet = SplitFixture()
+        o.AddOverride "tbf_not_exported=other.dll"
+        HasLine Tests_Emitter.BuiltWith(o).ModuleText("tbfixture"), "--dll binds it too, with a NOTE", _
+            "    ' NOTE: not exported by other.dll (declared because of --dll): a call fails at run time unless the DLL loaded then exports it" & vbCrLf & _
+            "    Public DeclareWide PtrSafe Function tbf_not_exported CDecl Lib ""other.dll"" () As Long"
+    End Sub
+
+    Private Sub CliKeepUnexported()
+        Dim o As New CliOptions, plain As New CliOptions
+        Dim a1() As String = Split("C:\h|a.h|C:\bin|C:\o|--keep-unexported", "|")
+        Dim a2() As String = Split("C:\h|a.h|C:\bin|C:\o", "|")
+        SelfTest.AssertEq "parses", o.Parse(a1), ""
+        SelfTest.AssertTrue "set", o.KeepUnexported
+        plain.Parse a2
+        SelfTest.AssertTrue "off by default", Not plain.KeepUnexported
+    End Sub
+
+    ' ---- integration: the fixture's real DLLs -----------------------------------------------
+
+    Private Sub RealDlls()
+        Dim bin As String = SelfTest.RepoRoot() & "\tests\fixture-c\bin"
+        Dim d As New DllSet
+        Dim problem As String = d.Load(bin & "\win64", bin & "\win32", New Collection)
+        SelfTest.AssertEq "loads", problem, ""
+        SelfTest.AssertEq "main DLL", d.DllFor("tbf_ret_int"), "tbfixture.dll"
+        SelfTest.AssertEq "ext DLL", d.DllFor("tbx_scale_point"), "tbfixture_ext.dll"
+        SelfTest.AssertEq "declared, not built", d.DllFor("tbx_not_built"), ""
+        SelfTest.AssertTrue "x86 exports of the main DLL", d.X86Exports("tbfixture.dll").Exists("_tbf_std_add@8")
+        SelfTest.AssertTrue "x86 exports of the ext DLL", d.X86Exports("tbfixture_ext.dll").Exists("tbx_version")
+        SelfTest.AssertEq "undeclared export", Joined(d.ExportedNotDeclared("tbfixture_ext.dll", NameSet("tbx_scale_point|tbx_version"))), "tbx_hidden|"
+    End Sub
+
+    Private Sub EndToEndTwoDlls()
+        Dim root As String = SelfTest.RepoRoot()
+        Dim t As String = SelfTest.NewTempFolder()
+        Dim out As String
+        Dim code As Long = Cli(root & "\tests\fixture-c|tbfixture.h|" & root & "\tests\fixture-c\bin\win64|" & t & "\out|--castxml|" & _
+            root & "\CastXML\vcpkg_installed\x64-windows\tools\castxml\bin\castxml.exe|--x86-dll|" & root & "\tests\fixture-c\bin\win32|--also|tbfixture_ext.h", out)
+        Dim src As String = FileNames(t & "\out\Source")
+        Dim main As String, ext As String, report As String, loader As String
+        If code = 0 Then
+            main = FileSys.ReadTextUtf8(t & "\out\Source\tbfixture.twin")
+            ext = FileSys.ReadTextUtf8(t & "\out\Source\tbfixture_ext.twin")
+            loader = FileSys.ReadTextUtf8(t & "\out\Source\tbfixture_Loader.twin")
+            report = FileSys.ReadTextUtf8(t & "\out\report.md")
+        End If
+        FileSys.RemovePath t
+        SelfTest.AssertTrue "exit code 0", code = 0, out
+        SelfTest.AssertEq "modules, named after the entry header", src, "tbfixture.twin;tbfixture_LayoutCheck.twin;tbfixture_Loader.twin;tbfixture_ext.twin;"
+        SelfTest.AssertTrue "main functions bind to tbfixture.dll", InStr(main, "Public DeclareWide PtrSafe Function tbf_ret_int CDecl Lib ""tbfixture.dll"" () As Long") > 0, Left$(main, 200)
+        SelfTest.AssertTrue "ext functions bind to tbfixture_ext.dll", InStr(ext, "Public DeclareWide PtrSafe Function tbx_version CDecl Lib ""tbfixture_ext.dll"" () As Long") > 0, ext
+        SelfTest.AssertTrue "the x86 decoration still applies", InStr(main, "Lib ""tbfixture.dll"" Alias ""_tbf_std_add@8""") > 0, "length " & Len(main)
+        SelfTest.AssertTrue "no declare for tbx_not_built", InStr(ext, "tbx_not_built") = 0, ext
+        SelfTest.AssertTrue "loader loads both", InStr(loader, "Return Array(""tbfixture.dll"", ""tbfixture_ext.dll"")") > 0, loader
+        SelfTest.AssertTrue "report: skipped", InStr(report, vbCrLf & "- tbx_not_built: exported by no DLL; no declare generated" & vbCrLf) > 0, report
+        SelfTest.AssertTrue "report: tbf_not_exported skipped too", InStr(report, vbCrLf & "- tbf_not_exported: exported by no DLL; no declare generated" & vbCrLf) > 0, report
+        SelfTest.AssertTrue "report: undeclared export", InStr(report, vbCrLf & "- tbfixture_ext.dll: tbx_hidden" & vbCrLf) > 0, report
+        SelfTest.AssertTrue "report: both DLLs counted", InStr(report, vbCrLf & "- tbfixture_ext.dll: 2 functions" & vbCrLf) > 0, report
+    End Sub
+End Module
