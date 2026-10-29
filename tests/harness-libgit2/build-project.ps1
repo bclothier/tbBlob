@@ -26,13 +26,14 @@ $bin86 = "$root\libgit2\vcpkg_installed_x86\x86-windows\bin"
 # 1. Bindings: generated fresh, then copied over the old ones only where changed (harness-sync.ps1)
 . "$root\tests\harness-sync.ps1"
 $new = if ($BindingsOnly) { $BindingsOnly } else { "$here\bindings.new" }
-if (Test-Path $new) { Remove-Item -Recurse -Force $new }
+Remove-Folder $new
 # git2.h plus every git2/sys/*.h (D-033); sys/stream.h needs ssize_t, which MSVC lacks (D-032)
 $also = @(Get-ChildItem "$include\git2\sys\*.h" | Sort-Object Name | ForEach-Object { "--also"; "git2\sys\$($_.Name)" })
 & $tbBlob $include git2.h $bin64 $new --castxml $castxml --x86-dll $bin86 -D ssize_t=intptr_t @also
 if ($LASTEXITCODE -ne 0) { Write-Host "FAILED: tbBlob exit $LASTEXITCODE"; exit 1 }
 if ($BindingsOnly) { exit 0 }
 $changed = Sync-Bindings $new "$here\bindings"
+Remove-Folder $new   # nothing left behind to be held open next time
 Set-Content "$here\bindings\tbblob.sha256" (Get-TbBlobHash $tbBlob) -Encoding ascii -NoNewline
 Write-Host "generated modules changed: $changed"
 

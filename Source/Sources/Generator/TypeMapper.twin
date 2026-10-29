@@ -9,6 +9,12 @@ Class TypeMapper
     Public Notes As New Collection
     ' What Disagreements is comparing right now, for error messages (errors carry context).
     Public CurrentItem As String
+    ' --pointer (D-054): C names (struct tags or typedefs) of outside structs whose T* parameters
+    ' are LongPtr; and each place that applied, "function(param): T* as LongPtr (--pointer)".
+    Public PointerTypes As New Collection
+    Public PointerUses As New Collection
+    Private mPointerStructs As Collection   ' struct name -> True (built from PointerTypes)
+    Private mPointerUseKeys As Collection
 
     Private mRecordIndex As Collection      ' record name -> first record of that name (D-038; keyed, D-040)
     Private mFunctionIndex As Collection    ' function name -> first function of that name
@@ -238,6 +244,61 @@ Class TypeMapper
         If IsComInterface(s) Then Return Nothing
         Return s
     End Function
+
+    ' ---- --pointer (D-054) -----------------------------------------------------------------
+
+    ' True for an outside struct --pointer names, by its tag or by a typedef naming it.
+    Private Function IsPointerStruct(ByVal structName As String) As Boolean
+        If PointerTypes.Count = 0 Then Return False
+        If mPointerStructs Is Nothing Then
+            Set mPointerStructs = New Collection
+            mPointerStructs.KeyCompareMode = vbBinaryCompare
+            Dim n As Variant, s As String
+            For Each n In PointerTypes
+                s = PointerStructName(n)
+                If Len(s) > 0 And Not mPointerStructs.Exists(s) Then mPointerStructs.Add True, s
+            Next
+        End If
+        Return mPointerStructs.Exists(structName)
+    End Function
+
+    ' The outside struct a --pointer name names (its tag, or a typedef of it: LOGFONTW ->
+    ' tagLOGFONTW); "" when the library uses no such struct.
+    Private Function PointerStructName(ByVal name As String) As String
+        Dim target As String = name
+        Dim td As MSXML2.IXMLDOMElement = Model.FindElement("Typedef", name)
+        If Not td Is Nothing Then
+            Dim s As MSXML2.IXMLDOMElement = Model.Strip(Model.Attr(td, "type"))
+            Do While Model.Tag(s) = "Typedef"
+                Set s = Model.Strip(Model.Attr(s, "type"))
+            Loop
+            If Model.Tag(s) = "Struct" Or Model.Tag(s) = "Union" Then target = Model.NameOf(s)
+        End If
+        Dim o As OutsideType
+        For Each o In OutsideTypes()
+            If o.Kind = "struct" And o.Name = target Then Return target
+        Next
+        Return ""
+    End Function
+
+    ' --pointer names that name no outside struct the library uses (reported).
+    Public Function UnmatchedPointerTypes() As Collection
+        Dim r As New Collection, n As Variant
+        For Each n In PointerTypes
+            If Len(PointerStructName(n)) = 0 Then r.Add n
+        Next
+        Return r
+    End Function
+
+    Private Sub NotePointerUse(ByVal text As String)
+        If mPointerUseKeys Is Nothing Then
+            Set mPointerUseKeys = New Collection
+            mPointerUseKeys.KeyCompareMode = vbBinaryCompare
+        End If
+        If mPointerUseKeys.Exists(text) Then Exit Sub
+        mPointerUseKeys.Add True, text
+        PointerUses.Add text
+    End Sub
 
     ' DECLARE_HANDLE's placeholder struct: struct X__ { int unused; }.
     Private Function IsHandleShape(ByVal s As MSXML2.IXMLDOMElement) As Boolean
@@ -650,8 +711,13 @@ NextMember:
                 Dim t As TypeInfo = Classify(c.RefId)
                 Select Case t.Kind
                     Case "record"
-                        p.Passing = "ByRef"
-                        p.TypeText = TypeText(t)
+                        If IsPointerStruct(t.TbType) Then
+                            p.TypeText = "LongPtr"
+                            NotePointerUse owner & "(" & p.Name & "): " & t.TbType & "* as LongPtr (--pointer)"
+                        Else
+                            p.Passing = "ByRef"
+                            p.TypeText = TypeText(t)
+                        End If
                     Case "opaque"
                         p.TypeText = t.TbType
                     Case "com"

@@ -36,3 +36,14 @@ function Sync-Bindings($new, $dest) {
     Remove-Item -Recurse -Force $new
     return $sourceChanged
 }
+
+# Removes a folder, retrying for up to 10 seconds: a file just written there (the 3 MB
+# Work\preprocessed_x64.i) can be held open for a moment by a virus scanner or an editor's file
+# watcher, which made run-all fail at random. The last attempt reports why it could not.
+function Remove-Folder($path) {
+    for ($i = 1; $i -le 20; $i++) {
+        if (-not (Test-Path $path)) { return }
+        try { Remove-Item -Recurse -Force $path -ErrorAction Stop; return } catch { Start-Sleep -Milliseconds 500 }
+    }
+    Remove-Item -Recurse -Force $path
+}

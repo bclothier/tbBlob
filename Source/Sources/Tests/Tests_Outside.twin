@@ -1,20 +1,27 @@
 ' Tests for types declared outside the header folder (task 27.0; D-054, D-058, D-064, D-065):
 ' classification, mapping, module placement, one alias per name, layout and x86/x64 checks, and the
 ' report. Integration: the Windows SDK's XML is ~8 MB per architecture, too big to commit as a
-' snapshot, so one real run of the fixture with --also tbfixture_win.h serves every test (cached).
+' snapshot, so one real run of the fixture with --also tbfixture_win.h serves every test (cached),
+' and a second with --qualify-outside and --pointer serves task 28.0's.
 Module Tests_Outside
     Public Const MODULE_ID As Long = 13
 
     Private mRun As String          ' the run's temp folder ("" before the first test)
     Private mOutput As String       ' its console output
     Private mCode As Long
+    Private mRunQ As String         ' the --qualify-outside --pointer run (task 28.0)
+    Private mOutputQ As String
+    Private mCodeQ As Long
 
     Public Sub Register()
         SelfTest.Add "outside: each reached type is classified (struct, enum, handle, opaque, com); nothing unreached is imported", MODULE_ID, 1, True
         SelfTest.Add "outside: signatures and fields map each kind (ByRef struct, by-value struct, handle and FILE aliases, LongPtr /* IStream */)", MODULE_ID, 2, True
         SelfTest.Add "outside: Types and Enums go into header-named modules, aliases to their file scope, each alias name once (D-065)", MODULE_ID, 3, True
         SelfTest.Add "outside: imported records are layout-checked and compared between x86 and x64", MODULE_ID, 4, True
-        SelfTest.Add "outside: the report's 'Outside types' and 'COM interfaces' sections", MODULE_ID, 5, True
+        SelfTest.Add "outside: the report's 'Outside types', 'COM interfaces' and 'Outside structs passed ByRef' sections", MODULE_ID, 5, True
+        SelfTest.Add "--qualify-outside: outside Types and Enums are module-qualified wherever used; aliases are not (D-065)", MODULE_ID, 6, True
+        SelfTest.Add "--pointer: a T* parameter of that outside struct is ByVal LongPtr; the struct is still imported; the report lists it and an unknown name", MODULE_ID, 7, True
+        SelfTest.Add "cli: --qualify-outside and --pointer parse; --pointer repeats", MODULE_ID, 8
     End Sub
 
     Public Sub RunTest(ByVal index As Long)
@@ -24,6 +31,9 @@ Module Tests_Outside
             Case 3: Placement
             Case 4: LayoutAndArch
             Case 5: ReportSections
+            Case 6: Qualified
+            Case 7: PointerOption
+            Case 8: CliOptionsParse
             Case Else: Err.Raise SelfTest.CHECK_FAILED, , "no test " & index & " in Tests_Outside"
         End Select
     End Sub
@@ -43,8 +53,22 @@ Module Tests_Outside
         Return mRun
     End Function
 
-    Private Function Source(ByVal moduleName As String) As String
-        Dim path As String = RunFolder() & "\out\Source\" & moduleName & ".twin"
+    ' The second cached run: the same with --qualify-outside --pointer LOGFONTW --pointer NOPE.
+    Private Function RunFolderQ() As String
+        If Len(mRunQ) > 0 Then Return mRunQ
+        mRunQ = SelfTest.NewTempFolder()
+        Dim root As String = SelfTest.RepoRoot()
+        Dim args() As String = Split(root & "\tests\fixture-c|tbfixture.h|tbfixture.dll|" & mRunQ & "\out|--castxml|" & _
+            root & "\CastXML\vcpkg_installed\x64-windows\tools\castxml\bin\castxml.exe|--also|tbfixture_win.h|-I|" & root & "\tests\fixture-outside" & _
+            "|--qualify-outside|--pointer|LOGFONTW|--pointer|NOPE", "|")
+        Console.StartCapture
+        mCodeQ = MainModule.Run(args)
+        mOutputQ = Console.StopCapture()
+        Return mRunQ
+    End Function
+
+    Private Function Source(ByVal moduleName As String, Optional ByVal qualified As Boolean = False) As String
+        Dim path As String = If(qualified, RunFolderQ(), RunFolder()) & "\out\Source\" & moduleName & ".twin"
         If FileSys.KindOf(path) <> FileSys.KIND_FILE Then Return ""
         Return FileSys.ReadTextUtf8(path)
     End Function
@@ -143,8 +167,50 @@ Module Tests_Outside
         HasLine r, "an opaque struct", "- OUT_OPAQUE: opaque (incomplete struct), LongPtr alias, module outlib (fixture-outside\outlib.h)"
         SelfTest.AssertTrue "COM interfaces section with its user", InStr(r, vbCrLf & "## COM interfaces" & vbCrLf & "- IStream (um\objidlbase.h): written LongPtr /* IStream */") > 0 And _
             InStr(r, "Used by: tbw_stream_ok" & vbCrLf) > 0, Mid$(r, InStr(r, "## COM"), 400)
-        ' the last test: remove the cached run
+        HasLine r, "an outside struct passed ByRef, a --pointer candidate", "- tbw_font_height(lf): ByRef As tagLOGFONTW (--pointer tagLOGFONTW would pass it as LongPtr)"
+        ' the last test of this run: remove it
         FileSys.RemovePath mRun
         mRun = ""
+    End Sub
+
+    Private Sub Qualified()
+        Dim folder As String = RunFolderQ()
+        SelfTest.AssertTrue "the run exits 0", mCodeQ = 0, mOutputQ
+        Dim t As String = Source("tbfixture_win", True)
+        HasLine t, "by value and return", "        ByVal a As windef.tagPOINT, _" & vbCrLf & "        ByVal b As windef.tagPOINT _" & vbCrLf & "    ) As windef.tagPOINT"
+        HasLine t, "a field", "        bounds As windef.tagRECT  ' C: RECT"
+        HasLine t, "an enum", "        ByVal mode As outlib.OUT_MODE _"
+        HasLine t, "a handle alias stays unqualified", "        ByVal dc As HDC _"
+        HasLine t, "FILE stays unqualified", "        ByVal f As FILE _"
+        HasLine t, "an alias field stays unqualified", "        brush As HBRUSH  ' C: HBRUSH"
+        HasLine Source("outlib", True), "a field of an outside struct, inside its own module", "        inner As outlib.OUT_INNER  ' C: OUT_INNER"
+        SelfTest.AssertTrue "library types stay unqualified", InStr(t, "As tbfixture.") = 0 And InStr(t, "As tbfixture_win.") = 0
+    End Sub
+
+    Private Sub PointerOption()
+        Dim folder As String = RunFolderQ()
+        SelfTest.AssertTrue "the run exits 0", mCodeQ = 0, mOutputQ
+        Dim t As String = Source("tbfixture_win", True)
+        HasLine t, "T* of the --pointer struct is ByVal LongPtr", "    Public DeclareWide PtrSafe Function tbw_font_height CDecl Lib ""tbfixture.dll"" ( _" & vbCrLf & "        ByVal lf As LongPtr _"
+        HasLine t, "both uses", "    Public DeclareWide PtrSafe Sub tbw_make_font CDecl Lib ""tbfixture.dll"" ( _" & vbCrLf & "        ByVal out As LongPtr _"
+        HasLine Source("wingdi", True), "the struct is still imported", "    Public Type tagLOGFONTW"
+        Dim r As String = FileSys.ReadTextUtf8(folder & "\out\report.md")
+        HasLine r, "reported", "- tbw_font_height(lf): tagLOGFONTW* as LongPtr (--pointer)"
+        HasLine r, "an unknown --pointer name", "- --pointer NOPE: the library uses no outside struct of that name; ignored"
+        ' the last test of this run: remove it
+        FileSys.RemovePath mRunQ
+        mRunQ = ""
+    End Sub
+
+    Private Sub CliOptionsParse()
+        Dim o As New CliOptions, plain As New CliOptions
+        Dim a1() As String = Split("C:\h|a.h|a.dll|C:\o|--qualify-outside|--pointer|LOGFONTW|--pointer|FILE", "|")
+        Dim a2() As String = Split("C:\h|a.h|a.dll|C:\o", "|")
+        SelfTest.AssertEq "parses", o.Parse(a1), ""
+        SelfTest.AssertTrue "--qualify-outside", o.QualifyOutside
+        SelfTest.AssertEq "--pointer repeats", o.PointerTypes.Count, 2
+        SelfTest.AssertEq "first --pointer", o.PointerTypes(1), "LOGFONTW"
+        plain.Parse a2
+        SelfTest.AssertTrue "off by default", Not plain.QualifyOutside And plain.PointerTypes.Count = 0
     End Sub
 End Module

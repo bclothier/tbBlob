@@ -8,6 +8,9 @@ Class Emitter
     Public CurrentItem As String
     ' TEST HOOK: raise a forced error when emitting the item with this C name ("" = never).
     Public FailOn As String
+    ' --qualify-outside (D-054, D-065): outside Types and Enums written <module>.<name>; aliases
+    ' stay unqualified. Set before Generate.
+    Public QualifyOutside As Boolean
     ' Why Generate failed, captured inside the class with CurrentItem (D-019: an error's text can
     ' be lost on its way out of a class method); "" when it did not fail.
     Public ErrorText As String
@@ -19,6 +22,7 @@ Class Emitter
     Private mNames As NameTable
     Private mMacros As MacroTable
     Private mMacros86 As MacroTable     ' Nothing: constants from the x64 dump only
+    Private mOutsideModules As Collection   ' outside Type/Enum name -> module (--qualify-outside)
     Private mPre As PreprocessedSource  ' Nothing: callback parameter names are reported lost
     Private mSkipped As Collection      ' SkippedHeader: --also headers CastXML could not read (D-057)
     Private mDlls As DllSet             ' which DLL each function binds to, and x86 exports (D-053)
@@ -138,10 +142,32 @@ Class Emitter
     Private Function TbType(ByVal t As String) As String
         If Len(t) = 0 Then Return ""
         Dim n As String = mNames.TbName(t, "type")
-        If Len(n) > 0 Then Return n
+        If Len(n) > 0 Then
+            If QualifyOutside Then
+                Dim om As String = OutsideModuleOf(t)
+                If Len(om) > 0 Then Return om & "." & n
+            End If
+            Return n
+        End If
         n = mNames.TbName(t, "delegate")
         If Len(n) > 0 Then Return n
         Return t
+    End Function
+
+    ' The module of an imported outside Type or Enum named t (--qualify-outside); "" for anything else.
+    Private Function OutsideModuleOf(ByVal t As String) As String
+        If mOutsideModules Is Nothing Then
+            Set mOutsideModules = New Collection
+            mOutsideModules.KeyCompareMode = vbBinaryCompare
+            Dim o As OutsideType
+            For Each o In mMap64.OutsideTypes()
+                If (o.Kind = "struct" Or o.Kind = "enum") And Not mOutsideModules.Exists(o.Name) Then
+                    mOutsideModules.Add Naming.ModuleName(o.HeaderPath, mHeaderFolder, mNames), o.Name
+                End If
+            Next
+        End If
+        If mOutsideModules.Exists(t) Then Return mOutsideModules(t)
+        Return ""
     End Function
 
     ' A Long (or LongLong) literal for an integer value: hex bit pattern outside the signed range.
@@ -206,7 +232,7 @@ Class Emitter
         Set mLayoutCalls = New Collection
         Set mTbLayout = New Collection
         Set mTbLayoutCases = New Collection
-        mSections = Array("Headers skipped", "Outside types", "COM interfaces", "Renamed", "Type aliases", "Skipped macros", "Parameter names lost", "Structs passed or returned by value", _
+        mSections = Array("Headers skipped", "Outside types", "COM interfaces", "Outside structs passed ByRef", "Renamed", "Type aliases", "Skipped macros", "Parameter names lost", "Structs passed or returned by value", _
             "Variadic functions", "stdcall functions", "Declared but not exported", "Exported but not declared", "Architecture-dependent constants", "Packing", "Unions", "Bitfields", "Mapping notes", "x86/x64 disagreements")
         Dim s As Variant
         For Each s In mSections
@@ -264,6 +290,7 @@ Class Emitter
             Rep "Mapping notes", line
         Next
         ReportComInterfaces
+        ReportByRefOutside
         For Each line In mMap64.Disagreements(mMap86)
             Rep "x86/x64 disagreements", line
         Next
@@ -488,6 +515,29 @@ Class Emitter
         Return Mid$(p, j + 1)
     End Function
 
+    ' The "Outside structs passed ByRef" report section (D-054): each parameter that passes an
+    ' outside struct ByRef -- a --pointer candidate -- and those --pointer made LongPtr.
+    Private Sub ReportByRefOutside()
+        Dim structs As New Collection, o As OutsideType, f As MSXML2.IXMLDOMElement, p As ParamInfo, line As Variant
+        structs.KeyCompareMode = vbBinaryCompare
+        For Each o In mMap64.OutsideTypes()
+            If o.Kind = "struct" And Not structs.Exists(o.Name) Then structs.Add True, o.Name
+        Next
+        For Each f In mM64.Functions()
+            For Each p In mMap64.ParamsOf(f)
+                If p.Passing = "ByRef" And structs.Exists(p.TypeText) Then
+                    Rep "Outside structs passed ByRef", mM64.Attr(f, "name") & "(" & p.Name & "): ByRef As " & p.TypeText & " (--pointer " & p.TypeText & " would pass it as LongPtr)"
+                End If
+            Next
+        Next
+        For Each line In mMap64.PointerUses
+            Rep "Outside structs passed ByRef", line
+        Next
+        For Each line In mMap64.UnmatchedPointerTypes()
+            Rep "Mapping notes", "--pointer " & line & ": the library uses no outside struct of that name; ignored"
+        Next
+    End Sub
+
     ' The "COM interfaces" report section (D-058): each interface and what uses it.
     Private Sub ReportComInterfaces()
         Dim o As OutsideType, f As MSXML2.IXMLDOMElement, r As MSXML2.IXMLDOMElement, p As ParamInfo, fi As FieldInfo
@@ -645,7 +695,8 @@ Class Emitter
         Next
         If accessors.Count > 0 Then
             Add m, ""
-            Add m, "    Private Declare PtrSafe Sub RtlMoveMemory Lib ""kernel32"" (ByVal Destination As LongPtr, ByVal Source As LongPtr, ByVal Length As LongPtr)"
+            ' D-067: tB's native vbaCopyBytes(length, dest, src) copies; no Declare (a Private Declare
+            ' inside the Type is not visible to its accessors)
             Dim i As Long
             For i = 1 To accessors.Count
                 EmitAccessor m, accessors(i), storages(i)
@@ -665,20 +716,20 @@ Class Emitter
         If Len(a.Bounds) = 0 Then
             Add m, "    Public Property Get " & a.Name & "() As " & t
             Add m, "        Dim v As " & t
-            Add m, "        RtlMoveMemory VarPtr(v), " & src & ", LenB(v)"
+            Add m, "        vbaCopyBytes LenB(v), VarPtr(v), " & src
             Add m, "        Return v"
             Add m, "    End Property"
             Add m, "    Public Property Let " & a.Name & "(" & byx & " v As " & t & ")"
-            Add m, "        RtlMoveMemory " & src & ", VarPtr(v), LenB(v)"
+            Add m, "        vbaCopyBytes LenB(v), " & src & ", VarPtr(v)"
             Add m, "    End Property"
         Else
             Add m, "    Public Property Get " & a.Name & "(ByVal index As Long) As " & t
             Add m, "        Dim v As " & t
-            Add m, "        RtlMoveMemory VarPtr(v), " & src & " + index * LenB(v), LenB(v)"
+            Add m, "        vbaCopyBytes LenB(v), VarPtr(v), " & src & " + index * LenB(v)"
             Add m, "        Return v"
             Add m, "    End Property"
             Add m, "    Public Property Let " & a.Name & "(ByVal index As Long, " & byx & " v As " & t & ")"
-            Add m, "        RtlMoveMemory " & src & " + index * LenB(v), VarPtr(v), LenB(v)"
+            Add m, "        vbaCopyBytes LenB(v), " & src & " + index * LenB(v), VarPtr(v)"
             Add m, "    End Property"
         End If
     End Sub

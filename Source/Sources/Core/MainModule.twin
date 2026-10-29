@@ -56,6 +56,10 @@ Module MainModule
             "                       (repeatable); it binds <f> even if <dll> does not export it", _
             "  --keep-unexported    declare functions no DLL exports anyway (with a NOTE), bound to the", _
             "                       DLL their header's other functions bind to, instead of skipping them", _
+            "  --qualify-outside    write types imported from other headers module-qualified", _
+            "                       (windef.tagPOINT); aliases such as HDC stay unqualified", _
+            "  --pointer <type>     pass that outside struct as LongPtr where a parameter is T*", _
+            "                       (repeatable; a struct tag or a typedef naming it)", _
             "  --self-test          run the built-in tests; --integration adds tests that use", _
             "                       CastXML, MSVC, MSXML6 and (to test the output) the import tool", _
             "", _

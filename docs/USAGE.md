@@ -28,6 +28,8 @@ tbBlob --help
 | `--also <header>` | Another header to generate from, relative to the header folder (repeatable). Use it for headers the entry header doesn't include, such as libgit2's `git2/sys/*.h`. tbBlob writes `Work\tbblob_entry.h`, which includes the entry header and each `--also` header. |
 | `--x86-dll <path>` | The library's **x86** DLL, or a folder of them. The export table of each function's x86 DLL (same file name) decides, per `__stdcall` function, whether x86 binds the plain name or the decorated `_name@N`, and flags functions the x86 DLL doesn't export. Recommended whenever you have the x86 DLLs. |
 | `--dll <f>=<dll>` | Binds function `<f>`, or every function of header `<f>` (a name ending in `.h`), to `<dll>`, one of the DLLs read from `<dll>` (repeatable). Needed for a function more than one DLL exports. It binds `<f>` even if that DLL doesn't export it; the declare then gets a `NOTE` and the report lists it. |
+| `--qualify-outside` | Write the Types and Enums imported from other headers module-qualified wherever they are used (`windef.tagPOINT`, `outlib.OUT_MODE`), so they can't be confused with a package's type of the same name. Aliases (`HDC`, `FILE`, ...) stay unqualified: twinBASIC can't qualify them, and each is declared once anyway. |
+| `--pointer <type>` | That outside struct (a struct tag or a typedef naming it: `LOGFONTW`) is passed `ByVal As LongPtr` where a parameter is `T*`, instead of `ByRef As T` (repeatable). For a struct you only ever pass through, such as another library's placeholder; by value and as a field it stays the real `Type`. The report's "Outside structs passed ByRef" section lists the candidates. |
 | `--keep-unexported` | Declare the functions no DLL exports anyway, instead of skipping them: each binds to the DLL most of its header's other functions bind to (or the only DLL, when there is one), with a `NOTE` above the declare, and the report lists it. For a DLL that exports more at run time than the one you generate against, or exports by ordinal only. A function this can't place is still skipped, and the report names `--dll` as the fix. |
 | `--castxml <path>` | The `castxml.exe` to use. Default: the `CASTXML` environment variable, then `castxml\bin\castxml.exe` next to `tbBlob.exe`, then `PATH`. |
 | `--check` | Check every dependency (CastXML, its resource headers, Visual Studio with the C++ tools, the Windows SDK through a real compile probe for x86 and x64, MSXML 6). Prints `OK`, `MISSING` (with the fix) or `SKIPPED` for each, then exits: 0 if all are OK, 4 otherwise. See [SETUP.md](SETUP.md#checking-a-machine-tbblob---check). |
@@ -140,6 +142,7 @@ loading them, then one section per kind of finding. Each entry gives its reason:
 | Headers skipped | `--also` headers CastXML could not read (a C++-only header, an `#error`, a missing dependency), each with the CastXML pass that failed and its error lines. Their functions and types are not generated; everything else is. See [A header CastXML cannot read](#a-header-castxml-cannot-read) |
 | Outside types | Types from headers outside the header folder (Windows SDK, C runtime, other libraries) that the library's declarations use, each with its kind and module. See [Types from other headers](#types-from-other-headers) |
 | COM interfaces | COM interface pointers, written `LongPtr /* IName */`, and the functions and fields that use each |
+| Outside structs passed ByRef | Each parameter passing an outside struct `ByRef` (a `--pointer` candidate), and those `--pointer` turned into `LongPtr` |
 | Renamed | Names changed to avoid a collision. twinBASIC is case-insensitive, so `TBF_OPEN` and `tbf_open` collide. Each entry names the other item |
 | Type aliases | C typedefs and type-naming macros emitted as `Public Alias` |
 | Skipped macros | Macros that can't be twinBASIC constants (function-like, initializers, casts, cycles), each with the reason |
@@ -230,7 +233,8 @@ the library uses, and everything those need, into one module per header, named a
 Every alias is one name for the whole project, declared once at file scope of its header's module
 (twinBASIC aliases can't be module-qualified). Names the library and another header both use are
 renamed and reported like any other collision. Give `-I` for another library's include folder, as
-for any header the library includes.
+for any header the library includes. `--qualify-outside` writes the imported Types module-qualified;
+`--pointer <type>` passes a struct you never look inside as `LongPtr`.
 
 ## A header CastXML cannot read
 

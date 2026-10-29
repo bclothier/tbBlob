@@ -36,7 +36,7 @@ Module Pipeline
         For Each s In r.SkippedHeaders
             Console.WriteOut "tbBlob: warning: skipped " & s.Header & ": " & If(s.ErrorLines.Count > 0, s.ErrorLines(1), "CastXML could not read it")
         Next
-        Return GenerateFrom(r.Xml86Path, r.Xml64Path, r.Macros86Path, r.Macros64Path, r.Preprocessed64Path, o.HeaderFolder, dlls, o.ProjectName, outputFolder, r.SkippedHeaders)
+        Return GenerateFrom(r.Xml86Path, r.Xml64Path, r.Macros86Path, r.Macros64Path, r.Preprocessed64Path, o.HeaderFolder, dlls, o.ProjectName, outputFolder, r.SkippedHeaders, o.QualifyOutside, o.PointerTypes)
     End Function
 
     ' Everything after CastXML, from its five output files; dlls says which DLL each function binds
@@ -44,7 +44,7 @@ Module Pipeline
     ' disagreement or a function more than one DLL exports writes nothing). preprocessed64File "":
     ' no preprocessed headers, so every callback's parameter names are reported lost (D-060).
     ' skipped: the --also headers CastXML could not read (SkippedHeader, D-057), for the report.
-    Public Function GenerateFrom(ByVal xml86 As String, ByVal xml64 As String, ByVal macros86File As String, ByVal macros64File As String, ByVal preprocessed64File As String, ByVal headerFolder As String, dlls As DllSet, ByVal projectName As String, ByVal outputFolder As String, Optional skipped As Collection = Nothing) As Long
+    Public Function GenerateFrom(ByVal xml86 As String, ByVal xml64 As String, ByVal macros86File As String, ByVal macros64File As String, ByVal preprocessed64File As String, ByVal headerFolder As String, dlls As DllSet, ByVal projectName As String, ByVal outputFolder As String, Optional skipped As Collection = Nothing, Optional ByVal qualifyOutside As Boolean = False, Optional pointerTypes As Collection = Nothing) As Long
         LastError = ""
         Dim m86 As New CxModel
         Dim m64 As New CxModel
@@ -64,6 +64,10 @@ Module Pipeline
         map86.Init m86
         Set map64 = New TypeMapper
         map64.Init m64
+        If Not pointerTypes Is Nothing Then
+            Set map86.PointerTypes = pointerTypes
+            Set map64.PointerTypes = pointerTypes
+        End If
 
         stage = "checking x86/x64 consistency"
         Progress stage
@@ -100,6 +104,7 @@ Module Pipeline
         e.FailOn = TestFailOn
         e.Init map64, map86, macros, dlls, headerFolder, projectName
         e.UseX86Macros macros86
+        e.QualifyOutside = qualifyOutside
         If Not pp Is Nothing Then e.UsePreprocessed pp
         If Not skipped Is Nothing Then e.UseSkippedHeaders skipped
 

@@ -10,6 +10,8 @@ Class CliOptions
     Public DllOverrides As New Collection   ' --dll: "<function or header>=<dll file name>" (D-053)
     Public ProjectNameGiven As Boolean      ' --name was given
     Public KeepUnexported As Boolean        ' --keep-unexported: declare functions no DLL exports (D-062)
+    Public QualifyOutside As Boolean        ' --qualify-outside: outside Types written <module>.<name> (D-054)
+    Public PointerTypes As New Collection   ' --pointer: outside structs whose T* parameters are LongPtr (D-054)
     Public IncludeDirs As New Collection
     Public Defines As New Collection
     Public AlsoHeaders As New Collection    ' --also: extra entry headers, relative to the header folder (D-033)
@@ -37,13 +39,17 @@ Class CliOptions
                     Me.Check = True
                 Case "--keep-unexported"
                     KeepUnexported = True
-                Case "--name", "-I", "-D", "--castxml", "--x86-dll", "--also", "--dll"
+                Case "--qualify-outside"
+                    QualifyOutside = True
+                Case "--name", "-I", "-D", "--castxml", "--x86-dll", "--also", "--dll", "--pointer"
                     If i = UBound(args) Then Return "option " & a & " needs a value"
                     i += 1
                     Select Case a
                         Case "--name"
                             ProjectName = args(i)
                             ProjectNameGiven = True
+                        Case "--pointer"
+                            PointerTypes.Add args(i)
                         Case "--dll"
                             If InStr(args(i), "=") < 2 Or Right$(args(i), 1) = "=" Then Return "option --dll needs <function or header>=<dll file name>, got: " & args(i)
                             DllOverrides.Add args(i)

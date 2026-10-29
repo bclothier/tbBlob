@@ -209,13 +209,14 @@ Module Tests_Emitter
     Private Sub Unions()
         Dim t As String = Text()
         HasLine t, "storage", "        union_data(0 To 0) As LongLong  ' union of: i, d, bytes"
-        HasLine t, "copy helper", "        Private Declare PtrSafe Sub RtlMoveMemory Lib ""kernel32"" (ByVal Destination As LongPtr, ByVal Source As LongPtr, ByVal Length As LongPtr)"
+        ' D-067: the accessors copy with tB's native vbaCopyBytes; no RtlMoveMemory Declare anywhere
+        SelfTest.AssertTrue "no RtlMoveMemory", InStr(t, "RtlMoveMemory") = 0
         HasLine t, "scalar accessor", "        Public Property Get i() As Long" & vbCrLf & "            Dim v As Long" & vbCrLf & _
-            "            RtlMoveMemory VarPtr(v), VarPtr(Me.union_data(0)) + 0, LenB(v)" & vbCrLf & "            Return v" & vbCrLf & _
+            "            vbaCopyBytes LenB(v), VarPtr(v), VarPtr(Me.union_data(0)) + 0" & vbCrLf & "            Return v" & vbCrLf & _
             "        End Property" & vbCrLf & "        Public Property Let i(ByVal v As Long)" & vbCrLf & _
-            "            RtlMoveMemory VarPtr(Me.union_data(0)) + 0, VarPtr(v), LenB(v)" & vbCrLf & "        End Property"
+            "            vbaCopyBytes LenB(v), VarPtr(Me.union_data(0)) + 0, VarPtr(v)" & vbCrLf & "        End Property"
         HasLine t, "array accessor", "        Public Property Get bytes(ByVal index As Long) As Byte"
-        HasLine t, "array accessor offset", "            RtlMoveMemory VarPtr(v), VarPtr(Me.union_data(0)) + 0 + index * LenB(v), LenB(v)"
+        HasLine t, "array accessor offset", "            vbaCopyBytes LenB(v), VarPtr(v), VarPtr(Me.union_data(0)) + 0 + index * LenB(v)"
         HasLine t, "union field in a struct", "        value As TBF_VALUE  ' C: TBF_VALUE"
         HasLine t, "anonymous storage", "        union_1(0 To 0) As Long  ' union of: as_int, as_float"
         HasLine t, "anonymous accessor", "        Public Property Get as_float() As Single"

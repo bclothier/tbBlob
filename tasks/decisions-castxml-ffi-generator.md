@@ -82,7 +82,8 @@
 | D-063 | 26a.0 | Task-only | D-057 as built: any untraceable error stays fatal; clang's omitted include stacks; one failed-output file per pass | Active |
 | D-064 | Spike | Finding | Module-qualified Types work everywhere; a Public Alias is project-wide and cannot be module-qualified | Active |
 | D-065 | 27.0, 28.0 | Plan | Outside types revised: aliases are project-wide names; same-name Types are always qualified | Active |
-| D-066 | 27.0 | Task-only | Outside types as built: one walk, alias kinds from typedefs, integration tests instead of snapshots | Active |
+| D-066 | 27.0 | Task-only | Outside types as built: one walk, alias kinds from typedefs, integration tests instead of snapshots | Superseded (partial) by D-067 |
+| D-067 | 28.0 | Task-only | Union accessors copy with tB's native vbaCopyBytes, not a RtlMoveMemory Declare | Active |
 
 ---
 ### D-001 — tB UDT layout equals C natural alignment for all 85 libgit2 structs, both archs (Task: Spike)
@@ -892,7 +893,7 @@
 ### D-066 — Outside types as built: one walk, alias kinds from typedefs, integration tests instead of snapshots (Task 27.0)
 - Date: 2026-10-28
 - Scope: Task-only
-- Status: Active
+- Status: Superseded (partial) by D-067
 - Context: implementing D-054/D-058 under D-065's rules.
 - Decision:
   - `TypeMapper.OutsideTypes()` walks the library's functions, record fields and typedefs once (then each imported struct's fields), each element once, each outside name once. The name table, the emitter, `FindRecord` (x86 twins) and `Disagreements` all use it; each architecture's mapper walks its own model.
@@ -903,3 +904,15 @@
   - Observed while checking: `tblaunch compile` on a bare source folder reports `RtlMoveMemory` unrecognised inside union accessors' `Type`-level `Private Declare`, for the unchanged pre-26.0 snapshot too; a real project build (the harness) compiles it. Not a tbBlob problem.
 - Rationale: one walk keeps emission, names and checks consistent; the typedef is where C says "this is a pointer", so the alias decision lives there.
 - Alternatives considered: committing the 16 MB of SDK snapshots; deciding handles by struct name patterns (D-054 rejected guessing).
+
+---
+### D-067 — Union accessors copy with tB's native vbaCopyBytes, not a RtlMoveMemory Declare (Task 28.0)
+- Date: 2026-10-28
+- Scope: Task-only
+- Status: Active
+- Supersedes: D-066 (partial: its "Observed" bullet blaming a tblaunch bare-folder quirk is wrong)
+- Context: proving 28.3 (the `--qualify-outside --pointer` generation compiles), a project built only from generated modules failed, in a bare-folder compile and in a real `.twinproj` build alike: `TB5079 Unrecognized symbol 'RtlMoveMemory'` in every union accessor. Since D-018 the emitter wrote `Private Declare PtrSafe Sub RtlMoveMemory` inside each union's `Type`, and tB does not make it visible to that Type's own property procedures. The fixture harness compiled only because its `Utf8.twin` declares a `Public RtlMoveMemory`, which the accessors bound to; libgit2 has no union accessors. Any user project binding a library with unions failed to compile. The user (2026-10-28) asked whether a native tB API should replace `RtlMoveMemory` (docs.twinbasic.com, tB/Modules/HiddenModule).
+- Decision: the accessors call tB's native `vbaCopyBytes length, dest, src` (`vbaCopyBytes LenB(v), VarPtr(v), VarPtr(Me.union_data(0)) + 0`, and the reverse for `Let`); no `Declare` is emitted at all. The bare-name snapshot (`tests\testdata\emitter-bare\`) and `Tests_Emitter` follow. tbBlob's own `Console.twin` still uses `RtlMoveMemory`; making it consistent is a separate commit after 28.0 (the user).
+- Rationale: a native intrinsic needs no declaration, so there is nothing to scope wrongly and nothing a test helper can mask.
+- Alternatives considered: one module-level `Private Declare RtlMoveMemory` per module with unions (compiles; built and tested first, then dropped for the native call); renaming the harness helper so it cannot mask (unnecessary once generated code declares nothing).
+- Verified under: tB BETA 1011, tblaunch builds for win32 and win64: the `--qualify-outside --pointer LOGFONTW` generation of the fixture (with `tbfixture_sys.h`, `tbfixture_ext.h`, `tbfixture_win.h`) builds untouched in a project with no `RtlMoveMemory` anywhere; the fixture harness's union checks (group 10: tagged and anonymous unions, the byte accessor) pass at run time on both, 205/205.

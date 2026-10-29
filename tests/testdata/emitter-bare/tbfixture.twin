@@ -239,30 +239,29 @@ Module tbfixture
     Public Type TBF_VALUE
         union_data(0 To 0) As LongLong  ' union of: i, d, bytes
 
-        Private Declare PtrSafe Sub RtlMoveMemory Lib "kernel32" (ByVal Destination As LongPtr, ByVal Source As LongPtr, ByVal Length As LongPtr)
         Public Property Get i() As Long
             Dim v As Long
-            RtlMoveMemory VarPtr(v), VarPtr(Me.union_data(0)) + 0, LenB(v)
+            vbaCopyBytes LenB(v), VarPtr(v), VarPtr(Me.union_data(0)) + 0
             Return v
         End Property
         Public Property Let i(ByVal v As Long)
-            RtlMoveMemory VarPtr(Me.union_data(0)) + 0, VarPtr(v), LenB(v)
+            vbaCopyBytes LenB(v), VarPtr(Me.union_data(0)) + 0, VarPtr(v)
         End Property
         Public Property Get d() As Double
             Dim v As Double
-            RtlMoveMemory VarPtr(v), VarPtr(Me.union_data(0)) + 0, LenB(v)
+            vbaCopyBytes LenB(v), VarPtr(v), VarPtr(Me.union_data(0)) + 0
             Return v
         End Property
         Public Property Let d(ByVal v As Double)
-            RtlMoveMemory VarPtr(Me.union_data(0)) + 0, VarPtr(v), LenB(v)
+            vbaCopyBytes LenB(v), VarPtr(Me.union_data(0)) + 0, VarPtr(v)
         End Property
         Public Property Get bytes(ByVal index As Long) As Byte
             Dim v As Byte
-            RtlMoveMemory VarPtr(v), VarPtr(Me.union_data(0)) + 0 + index * LenB(v), LenB(v)
+            vbaCopyBytes LenB(v), VarPtr(v), VarPtr(Me.union_data(0)) + 0 + index * LenB(v)
             Return v
         End Property
         Public Property Let bytes(ByVal index As Long, ByVal v As Byte)
-            RtlMoveMemory VarPtr(Me.union_data(0)) + 0 + index * LenB(v), VarPtr(v), LenB(v)
+            vbaCopyBytes LenB(v), VarPtr(Me.union_data(0)) + 0 + index * LenB(v), VarPtr(v)
         End Property
     End Type
 
@@ -279,22 +278,21 @@ Module tbfixture
         kind As Long  ' C: int
         union_1(0 To 0) As Long  ' union of: as_int, as_float
 
-        Private Declare PtrSafe Sub RtlMoveMemory Lib "kernel32" (ByVal Destination As LongPtr, ByVal Source As LongPtr, ByVal Length As LongPtr)
         Public Property Get as_int() As Long
             Dim v As Long
-            RtlMoveMemory VarPtr(v), VarPtr(Me.union_1(0)) + 0, LenB(v)
+            vbaCopyBytes LenB(v), VarPtr(v), VarPtr(Me.union_1(0)) + 0
             Return v
         End Property
         Public Property Let as_int(ByVal v As Long)
-            RtlMoveMemory VarPtr(Me.union_1(0)) + 0, VarPtr(v), LenB(v)
+            vbaCopyBytes LenB(v), VarPtr(Me.union_1(0)) + 0, VarPtr(v)
         End Property
         Public Property Get as_float() As Single
             Dim v As Single
-            RtlMoveMemory VarPtr(v), VarPtr(Me.union_1(0)) + 0, LenB(v)
+            vbaCopyBytes LenB(v), VarPtr(v), VarPtr(Me.union_1(0)) + 0
             Return v
         End Property
         Public Property Let as_float(ByVal v As Single)
-            RtlMoveMemory VarPtr(Me.union_1(0)) + 0, VarPtr(v), LenB(v)
+            vbaCopyBytes LenB(v), VarPtr(Me.union_1(0)) + 0, VarPtr(v)
         End Property
     End Type
 
