@@ -1,0 +1,10 @@
+' SPIKE-11 follow-up, compile-only: a file-scope Private Alias HDC in a file other than windef.twin,
+' which declares Public Alias HDC; the name is used in this file.
+Private Alias HDC As LongPtr
+
+Module VariantUse
+    Public Sub UseIt()
+        Dim x As HDC
+        Debug.Print LenB(x)
+    End Sub
+End Module

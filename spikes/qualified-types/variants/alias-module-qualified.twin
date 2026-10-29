@@ -1,0 +1,8 @@
+' SPIKE-11 compile-only variant (1): the file-scope alias HDC (windef.twin) qualified with that
+' file's module name.
+Module VariantUse
+    Public Sub UseIt()
+        Dim h As windef.HDC
+        Debug.Print LenB(h)
+    End Sub
+End Module

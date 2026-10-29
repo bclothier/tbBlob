@@ -1,0 +1,6 @@
+' SPIKE-11 follow-up, compile-only: a file-scope Private Alias PH, used from another file (pa2).
+Private Alias PH As LongPtr
+
+Module pa1
+    Public Const MARK As Long = 1
+End Module

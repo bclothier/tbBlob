@@ -1,0 +1,7 @@
+' SPIKE-11 follow-up, compile-only: comparing a one-field Type handle with 0, as code does with handles.
+Module VariantUse
+    Public Sub UseIt()
+        Dim t As winhandles.HDC_T
+        If t = 0 Then Debug.Print "null"
+    End Sub
+End Module

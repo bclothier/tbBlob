@@ -1,0 +1,12 @@
+' SPIKE-11 compile-only variant: a Type whose name equals a module name (C allows a struct named
+' like a header: windef.h's module "windef" next to a struct "windef"), used qualified.
+Module VariantUse
+    Public Type windef
+        a As Long
+    End Type
+
+    Public Sub UseIt()
+        Dim t As VariantUse.windef
+        Debug.Print LenB(t), windef.WINDEF_MARKER
+    End Sub
+End Module

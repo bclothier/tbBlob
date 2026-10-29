@@ -46,6 +46,21 @@ shared state loses updates. COM needs `CoInitializeEx` on that thread. An unhand
 to C and shows a modal "Run-time error" box. This became the "Callbacks on the library's own
 threads" guidance in [docs\USAGE.md](../docs/USAGE.md) and the thread checks in the fixture harness.
 
+## qualified-types\ — SPIKE-11
+
+Before tasks 27.0 and 28.0 (D-054): can generated code name an outside type through a header-named
+module (`wingdi.tagLOGFONTW`), and how do same-named types resolve between local modules and a
+referenced package? A tB console probe (`Sources\`) with a tiny local package (`package\ShadowPkg\`)
+checks each form with `LenB` and real Win32 calls (`GetDC`, `GetObjectW`) on both architectures
+(`results\results-<arch>.txt`). Forms that might not compile are in `variants\`: `build-project.ps1`
+compiles each one added to the probe and writes what the compiler said to `results\variants.txt`.
+The probe is built and run with tblaunch, without the IDE.
+
+Finding: **D-064**, which led to **D-065** (a partial revision of D-054). Module-qualified `Type`
+names work everywhere, and a local `Type` shadows a package's. But a `Public Alias` is file-scope and
+project-wide: it can't be module-qualified, and two declarations of one alias name don't compile. A
+`Type` name defined in two modules must be qualified at every use.
+
 ## Running one again
 
 Each folder's scripts regenerate their own outputs; those outputs are gitignored. A spike needs the

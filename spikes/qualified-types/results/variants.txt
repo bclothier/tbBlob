@@ -1,0 +1,96 @@
+﻿== alias-duplicate.twin: exit 1
+   {ERROR} /qualprobe/Sources/Probe.twin [7,26]: TB5137 'HDC' is ambiguous. Could be: [None] qualprobe.HDC [None] qualprobe.HDC
+   {ERROR} /qualprobe/Sources/Probe.twin [35,81]: TB5137 'HDC' is ambiguous. Could be: [Built-In DataType] qualprobe.HDC [Built-In DataType] qualprobe.HDC
+   {ERROR} /qualprobe/Sources/Probe.twin [29,15]: TB5137 'HDC' is ambiguous. Could be: [Built-In DataType] qualprobe.HDC [Built-In DataType] qualprobe.HDC
+   {ERROR} /qualprobe/Sources/Probe.twin [11,84]: TB5137 'HDC' is ambiguous. Could be: [Built-In DataType] qualprobe.HDC [Built-In DataType] qualprobe.HDC
+   {ERROR} /qualprobe/Sources/Probe.twin [11,84]: TB5137 'HDC' is ambiguous. Could be: [Built-In DataType] qualprobe.HDC [Built-In DataType] qualprobe.HDC
+   {ERROR} /qualprobe/Sources/Probe.twin [12,98]: TB5137 'HDC' is ambiguous. Could be: [Built-In DataType] qualprobe.HDC [Built-In DataType] qualprobe.HDC
+   {ERROR} /qualprobe/Sources/Probe.twin [22,78]: TB5137 'HDC' is ambiguous. Could be: [Built-In DataType] qualprobe.HDC [Built-In DataType] qualprobe.HDC
+   {ERROR} /qualprobe/Sources/Probe.twin [48,76]: TB5137 'HDC' is ambiguous. Could be: [Built-In DataType] qualprobe.HDC [Built-In DataType] qualprobe.HDC
+   {ERROR} /qualprobe/Sources/Probe.twin [75,19]: TB5137 'HDC' is ambiguous. Could be: [Built-In DataType] qualprobe.HDC [Built-In DataType] qualprobe.HDC
+   {ERROR} /qualprobe/Sources/Probe.twin [105,29]: TB5137 'HDC' is ambiguous. Could be: [Built-In DataType] qualprobe.HDC [Built-In DataType] qualprobe.HDC
+   {ERROR} /qualprobe/Sources/Probe.twin [75,33]: TB5086 Expression is neither used nor assigned
+   {ERROR} /qualprobe/Sources/Probe.twin [78,60]: TB5125 LenB() failed due to an internal error
+   {ERROR} /qualprobe/Sources/Probe.twin [88,54]: TB5125 LenB() failed due to an internal error
+   {ERROR} /qualprobe/Sources/Probe.twin [106,87]: TB5125 LenB() failed due to an internal error
+   {ERROR} /qualprobe/Sources/Probe.twin [126,127]: TB5001 Validation of call to 'GetDeviceCaps' failed. Argument for 'hDC': cannot coerce type 'LongLong' to '{unresolved}'
+   {ERROR} /qualprobe/Sources/VariantUse.twin [7,18]: TB5137 'HDC' is ambiguous. Could be: [Built-In DataType] qualprobe.HDC [Built-In DataType] qualprobe.HDC
+   {ERROR} /qualprobe/Sources/VariantUse.twin [8,21]: TB5125 LenB() failed due to an internal error
+   --- 17 error(s), 0 warning(s), 0 hint(s), 0 info
+   compile done: 3631.046 ms after the launch, 3685.710 ms after the start
+== alias-module-qualified.twin: exit 1
+   {ERROR} /qualprobe/Sources/VariantUse.twin [5,25]: TB5079 Unrecognised datatype symbol 'HDC'
+   {ERROR} /qualprobe/Sources/VariantUse.twin [6,21]: TB5125 LenB() failed due to an internal error
+   --- 2 error(s), 0 warning(s), 0 hint(s), 0 info
+   compile done: 3240.469 ms after the launch, 3335.147 ms after the start
+== alias-project-qualified.twin: exit 0
+   --- 0 error(s), 0 warning(s), 0 hint(s), 0 info
+   compile done: 3744.735 ms after the launch, 3781.000 ms after the start
+== ambiguous.twin: exit 1
+   {ERROR} /qualprobe/Sources/VariantUse.twin [4,18]: TB5137 'TWICE' is ambiguous. Could be: [Type] qualprobe.dup1.TWICE [Type] qualprobe.dup2.TWICE
+   {ERROR} /qualprobe/Sources/VariantUse.twin [5,21]: TB5125 LenB() failed due to an internal error
+   --- 2 error(s), 0 warning(s), 0 hint(s), 0 info
+   compile done: 3495.820 ms after the launch, 3589.768 ms after the start
+== package-only-qualifier.twin: exit 0
+   --- 0 error(s), 0 warning(s), 0 hint(s), 0 info
+   compile done: 2929.621 ms after the launch, 2967.452 ms after the start
+== package-qualified.twin: exit 0
+   --- 0 error(s), 0 warning(s), 0 hint(s), 0 info
+   compile done: 3660.956 ms after the launch, 3922.834 ms after the start
+== private-alias-behind-public-alias.twin: exit 1
+   {ERROR} /qualprobe/Sources/VariantUse.twin [6,8]: TB5182 Syntax error. No handler for this symbol
+   {ERROR} /qualprobe/Sources/VariantUse.twin [7,5]: TB5182 Syntax error. No handler for this symbol
+   {ERROR} /qualprobe/Sources/VariantUse.twin [8,1]: TB5182 Syntax error. No handler for this symbol
+   {ERROR} /qualprobe/Sources/VariantUse.twin [4,22]: TB5079 Unrecognized datatype symbol 'PH'
+   {ERROR} /qualprobe/Sources/VariantUse.twin [13,18]: TB5079 Unrecognized datatype symbol 'FILESCOPE_T'
+   {ERROR} /qualprobe/Sources/VariantUse.twin [14,21]: TB5125 LenB() failed due to an internal error
+   {ERROR} /qualprobe/Sources/VariantUse.twin [14,30]: TB5125 LenB() failed due to an internal error
+   --- 7 error(s), 0 warning(s), 0 hint(s), 0 info
+   compile done: 2895.063 ms after the launch, 3012.370 ms after the start
+== private-alias-in-module.twin: exit 1
+   {ERROR} /qualprobe/Sources/VariantUse.twin [3,19]: TB5182 Syntax error. No handler for this symbol
+   {ERROR} /qualprobe/Sources/VariantUse.twin [6,18]: TB5079 Unrecognized datatype symbol 'PH'
+   {ERROR} /qualprobe/Sources/VariantUse.twin [7,21]: TB5125 LenB() failed due to an internal error
+   --- 3 error(s), 0 warning(s), 0 hint(s), 0 info
+   compile done: 4224.842 ms after the launch, 4263.944 ms after the start
+== private-alias-other-file: exit 1
+   {ERROR} /qualprobe/Sources/pa2.twin [4,18]: TB5079 Unrecognized datatype symbol 'PH'
+   {ERROR} /qualprobe/Sources/pa2.twin [5,16]: TB5125 LenB() failed due to an internal error
+   --- 2 error(s), 0 warning(s), 0 hint(s), 0 info
+   compile done: 3076.515 ms after the launch, 3118.196 ms after the start
+== private-alias-shadows-public.twin: exit 0
+   --- 0 error(s), 0 warning(s), 0 hint(s), 0 info
+   compile done: 4251.636 ms after the launch, 4287.934 ms after the start
+== private-alias-twice: exit 1
+   {ERROR} /qualprobe/Sources/pa1.twin [6,18]: TB5079 Unrecognized datatype symbol 'PH'
+   {ERROR} /qualprobe/Sources/pa1.twin [7,16]: TB5125 LenB() failed due to an internal error
+   {ERROR} /qualprobe/Sources/pa2.twin [6,18]: TB5079 Unrecognized datatype symbol 'PH'
+   {ERROR} /qualprobe/Sources/pa2.twin [7,16]: TB5125 LenB() failed due to an internal error
+   --- 4 error(s), 0 warning(s), 0 hint(s), 0 info
+   compile done: 2905.585 ms after the launch, 2942.227 ms after the start
+== type-handle-compare.twin: exit 1
+   {ERROR} /qualprobe/Sources/VariantUse.twin [5,16]: TB5028 Unable to convert type 'Integer' to type 'HDC_T'
+   {ERROR} /qualprobe/Sources/VariantUse.twin [5,12]: TB5026 [equal] operator not allowed here
+   --- 2 error(s), 0 warning(s), 0 hint(s), 0 info
+   compile done: 3432.081 ms after the launch, 3467.459 ms after the start
+== type-handle-from-longptr.twin: exit 1
+   {ERROR} /qualprobe/Sources/VariantUse.twin [6,38]: TB5028 Unable to convert type 'LongLong' to type 'HDC_T'
+   {ERROR} /qualprobe/Sources/VariantUse.twin [7,29]: TB5001 unable to convert type HDC_T to LongLong
+   --- 2 error(s), 0 warning(s), 0 hint(s), 0 info
+   compile done: 5470.335 ms after the launch, 5516.330 ms after the start
+== type-handle-literal.twin: exit 1
+   {ERROR} /qualprobe/Sources/VariantUse.twin [6,27]: TB5001 Validation of call to 'RDC' failed. Argument for 'hDC': cannot coerce type 'Integer' to 'HDC_T'
+   --- 1 error(s), 0 warning(s), 0 hint(s), 0 info
+   compile done: 3920.657 ms after the launch, 3955.800 ms after the start
+== type-handle-vbnullptr.twin: exit 1
+   {ERROR} /qualprobe/Sources/VariantUse.twin [6,27]: TB5001 Validation of call to 'RDC' failed. Argument for 'hDC': cannot coerce type 'LongLong' to 'HDC_T'
+   --- 1 error(s), 0 warning(s), 0 hint(s), 0 info
+   compile done: 3758.993 ms after the launch, 3848.326 ms after the start
+== type-named-like-module.twin: exit 0
+   {WARNING} /qualprobe/Sources/windef.twin [5,8]: TB0033 duplicate definition in the current scope [windef], consider changing the name to be unique
+   --- 0 error(s), 1 warning(s), 0 hint(s), 0 info
+   compile done: 5983.469 ms after the launch, 6034.654 ms after the start
+== type-wraps-private-alias: exit 1
+   {ERROR} /qualprobe/Sources/wrap.twin [6,18]: TB5079 Unrecognized datatype symbol 'PH'
+   --- 1 error(s), 0 warning(s), 0 hint(s), 0 info
+   compile done: 6757.678 ms after the launch, 6795.507 ms after the start

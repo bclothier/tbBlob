@@ -1,0 +1,10 @@
+' SPIKE-11 follow-up, compile-only: assigning a LongPtr (a handle from other code, e.g. WinDevLib's
+' LongPtr HDC) to a one-field Type handle, and back.
+Module VariantUse
+    Public Sub UseIt()
+        Dim p As LongPtr = 5
+        Dim t As winhandles.HDC_T = p
+        Dim q As LongPtr = t
+        Debug.Print q
+    End Sub
+End Module

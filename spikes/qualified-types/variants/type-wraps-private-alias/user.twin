@@ -1,0 +1,8 @@
+' SPIKE-11 follow-up, compile-only: another file uses wrapmod.HDCW and its Value.
+Module wrapuser
+    Public Function UseIt() As LongPtr
+        Dim w As wrapmod.HDCW
+        w.Value = 5
+        Return w.Value
+    End Function
+End Module

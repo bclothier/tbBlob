@@ -36,3 +36,6 @@ spikes/threads/bin/
 spikes/threads/project/
 spikes/threads/results/
 spikes/threads/threadprobe.twinproj
+spikes/qualified-types/project/
+spikes/qualified-types/variant.work/
+spikes/qualified-types/qualprobe.twinproj

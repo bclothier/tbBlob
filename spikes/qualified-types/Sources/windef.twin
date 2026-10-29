@@ -1,0 +1,7 @@
+' SPIKE-11: a DECLARE_HANDLE handle as a LongPtr alias from a header-named file (shared\windef.h).
+' tB allows Public Alias only at file scope (a Module rejects it), as tbBlob already writes it (D-025).
+Public Alias HDC As LongPtr
+
+Module windef
+    Public Const WINDEF_MARKER As Long = 1
+End Module

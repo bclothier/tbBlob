@@ -1,0 +1,7 @@
+' SPIKE-11 follow-up, compile-only: uses pa1.twin's Private Alias PH.
+Module pa2
+    Public Function Size2() As Long
+        Dim x As PH
+        Return LenB(x)
+    End Function
+End Module

@@ -1,0 +1,7 @@
+' SPIKE-11: two local modules define TWICE (4 bytes in dup1, 16 here).
+Module dup2
+    Public Type TWICE
+        a As Double
+        b As Double
+    End Type
+End Module

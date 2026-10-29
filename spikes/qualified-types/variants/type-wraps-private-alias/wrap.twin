@@ -1,0 +1,8 @@
+' SPIKE-11 follow-up, compile-only: a Private file-scope alias exposed through a Public module Type.
+Private Alias PH As LongPtr
+
+Module wrapmod
+    Public Type HDCW
+        Value As PH
+    End Type
+End Module

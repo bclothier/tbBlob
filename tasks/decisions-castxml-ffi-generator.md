@@ -70,7 +70,7 @@
 | D-051 | 24.0 (new) | Task-only | Fixture snapshots store {REPO}; tests resolve it to the real repo root (SelfTest.Fixture); no absolute paths in test data | Active |
 | D-052 | cairo (assessment) | Finding | cairo 1.18.4: 419 of 425 exports generated; outside types dangle; one DLL per run duplicates cairo.h | Active |
 | D-053 | 26.0 (new) | Plan | Bind each function to the DLL whose export table has it (DLL file or folder) | Active |
-| D-054 | SPIKE-11, 27.0, 28.0 (new) | Plan | Import outside types into header-named modules; LongPtr aliases only where C/SDK make it certain; --qualify-outside, --pointer | Active |
+| D-054 | SPIKE-11, 27.0, 28.0 (new) | Plan | Import outside types into header-named modules; LongPtr aliases only where C/SDK make it certain; --qualify-outside, --pointer | Superseded (partial) by D-065 |
 | D-055 | 29.0, 30.0 (new) | Plan | cairo becomes the second proof library: generation, compile and layout tests, then a runtime harness | Active |
 | D-056 | 25.0 (new) | Task-only | Arguments ending in a backslash break the quoted CastXML command line; quote by the C runtime rules | Active |
 | D-057 | 26a.0 (new) | Plan | A header CastXML cannot read is skipped (traced via tbblob_entry.h) and reported, not fatal | Active |
@@ -80,6 +80,8 @@
 | D-061 | Issue #1 | Finding | Known issue: CastXML (C mode) cannot read the SDK's webservices.h — two empty enums | Active |
 | D-062 | 26.0 | Task-only | D-053 as built: project named after the entry header for a DLL folder; multi-DLL loader raises; libgit2 loses 9 unexported declares; --keep-unexported | Active |
 | D-063 | 26a.0 | Task-only | D-057 as built: any untraceable error stays fatal; clang's omitted include stacks; one failed-output file per pass | Active |
+| D-064 | Spike | Finding | Module-qualified Types work everywhere; a Public Alias is project-wide and cannot be module-qualified | Active |
+| D-065 | 27.0, 28.0 | Plan | Outside types revised: aliases are project-wide names; same-name Types are always qualified | Active |
 
 ---
 ### D-001 — tB UDT layout equals C natural alignment for all 85 libgit2 structs, both archs (Task: Spike)
@@ -716,7 +718,7 @@
 ### D-054 — Import outside types into header-named modules; LongPtr aliases only where C/SDK make it certain; --qualify-outside, --pointer (SPIKE-11, Tasks 27.0, 28.0 (new))
 - Date: 2026-10-22
 - Scope: Plan
-- Status: Active
+- Status: Superseded (partial) by D-065
 - Context: D-052's dangling types. Discussed with the user (2026-10-21/22): a pointer is passed as one address whatever the struct's size, so `ByVal LongPtr` is exact for any pointer; a struct passed or returned by value, or embedded as a field, is copied (x86: whole struct on the stack; x64: 1/2/4/8 bytes in a register, else a pointer to a caller copy; returns may use a hidden pointer) and needs its real layout. C refuses by-value use of an incomplete struct, so whenever by-value use occurs CastXML has the full layout. The user: import outside structs rather than collapse them, and accept name clashes with packages (a local module takes priority in tB; the module name disambiguates).
 - Decision:
   - **Outside type** = a struct, union, enum or typedef declared in a header not under the header folder (Windows SDK, CRT, other libraries) that a library declaration uses. It is emitted into a module named after its header, by the same rule as library modules (`Naming.ModuleName`, relative to its include root): `windef`, `wingdi`, `corecrt_wstdio`, `freetype`, ... Every type it needs is imported too (transitive closure; `FT_FaceRec_` brings `FT_Generic`, `FT_BBox`, ...). Its layout is checked like a library record (LayoutCheck, x86/x64 comparison).
@@ -850,3 +852,37 @@
   - Method: not red-first. `FailingHeaders`/`ErrorLinesFor` and their tests were written together against captured CastXML output and compiled once.
 - Rationale: a run that succeeds must have failed only because of the headers it dropped; anything else is a problem the user has to see.
 - Alternatives considered: skipping the traced headers and ignoring the untraced errors (the retry would fail anyway, with a less clear message).
+
+---
+### D-064 — Module-qualified Types work everywhere; a Public Alias is project-wide and cannot be module-qualified (Task: Spike)
+- Date: 2026-10-28
+- Scope: Finding
+- Status: Active
+- Context: SPIKE-11, before tasks 27.0/28.0 (D-054). Probe: `spikes\qualified-types\` — header-named modules `wingdi` (`Public Type tagLOGFONTW`, 92 bytes) and `windef` (`HDC`); `local_a.SAMENAME` (8 bytes) shadowing `SAMENAME` (4 bytes) of a local package `ShadowPkg` (module `pkgtypes`); `dup1.TWICE` (4) and `dup2.TWICE` (16); `LenB` shows which Type a name resolved to; compile-only variants for forms that might fail (`results\variants.txt`).
+- Decision (observed):
+  - **(1) Types: yes.** `wingdi.tagLOGFONTW` works as a `Declare` `ByRef` parameter (gdi32 `GetObjectW` filled it: face "MS Shell Dlg"; `RtlMoveMemory` with two), a tB function's return type, a `Type` field, a `Public Alias` target, and in a `Delegate` signature (called through `AddressOf`). 23/23 checks PASS on win32 and win64; the `Type` holding both kinds of field is 108 / 120 bytes, as C lays it out.
+  - **(1) Aliases: no, not by module.** `Public Alias` inside a `Module` is a syntax error (TB5182): aliases are file-scope only (tbBlob already writes them there, D-025). `windef.HDC` does not compile (TB5079 unrecognised datatype); the project name qualifies it: `qualprobe.HDC` works. **Two files declaring the same alias name** (`Public Alias HDC As LongPtr` twice, same target) fail at every use, qualified or not (TB5137 "'HDC' is ambiguous ... qualprobe.HDC, qualprobe.HDC").
+  - **(2)** A local `Type` shadows a package's: unqualified `SAMENAME` is the local one (8); `local_a.SAMENAME` and `qualprobe.SAMENAME` give the local one; `pkgtypes.SAMENAME`, `ShadowPkg.pkgtypes.SAMENAME` and `ShadowPkg.SAMENAME` give the package's (4); a Type only the package defines works unqualified.
+  - **(3)** Two local modules defining the same `Type` name compile; qualified uses resolve correctly (4 vs 16); an **unqualified use is a compile error** (TB5137 "'TWICE' is ambiguous. Could be: qualprobe.dup1.TWICE, qualprobe.dup2.TWICE").
+  - **(4)** All of the above holds in `Delegate` signatures.
+  - Also: a `Type` named like a module (`VariantUse.windef` next to module `windef`) compiles, with warning TB0033.
+  - **Follow-up (the user, 2026-10-28): a handle as a one-field `Type`** (`winhandles.HDC_T` with `Value As LongPtr`) instead of an alias. It works at the ABI level: returned by `GetDC`, passed `ByVal` to `GetDeviceCaps` (96 dpi, the same answer as through the alias), through a `Delegate` by value, a zeroed one passes NULL, `ReleaseDC` = 1; `LenB` = pointer size (29/29 on win32 and win64). What no longer compiles: `If t = 0` (TB5026/TB5028), passing `0` or `vbNullPtr` (TB5001 cannot coerce to `HDC_T`), and assigning a `LongPtr` to it or it to a `LongPtr` (TB5028/TB5001), so every comparison, NULL and hand-over to or from other code goes through `.Value`.
+  - **Follow-up: a `Private Alias` cannot back anything.** At file scope it is not visible even in its own file: not from a module there (TB5079 in both files of a pair that each declare `Private Alias PH`), not from a `Public Alias` there, and not as the field type of a public module `Type` (TB5079). Inside a `Module` it is a syntax error (TB5182), like `Public Alias`. A file-scope `Public Type` is a syntax error too (Types live in modules). A file-scope `Private Alias HDC` in one file next to `Public Alias HDC` in another compiles (the public one is used).
+- Verified under: twinBASIC BETA 1011 (v0.15.1011), built with tblaunch (no IDE) for win32 and win64, local package referenced with `isLocalPackage` under `Packages\ShadowPkg\`; Windows 11, gdi32/user32/kernel32.
+
+---
+### D-065 — Outside types revised by SPIKE-11: aliases are project-wide names; same-name Types are always qualified (Task 27.0, 28.0)
+- Date: 2026-10-28
+- Scope: Plan
+- Status: Active
+- Supersedes: D-054 (partial: the `--qualify-outside` spelling of aliases, and name clashes between generated modules)
+- Context: D-064. D-054 assumed every outside name could be written module-qualified (`windef.HDC`) and that clashes only matter against packages.
+- Decision:
+  - **Outside `Type`s** (structs, unions, enums) stay as D-054 says: header-named modules, and `--qualify-outside` writes them `<module>.<Type>`.
+  - **Every alias is a project-wide name** (handle aliases like `HDC`, opaque and `FILE` aliases, pointer typedefs, and the library's own type aliases, D-025). tbBlob declares each alias name once in the whole project, at file scope of the module of the header that first declares it; `--qualify-outside` leaves aliases unqualified. An outside alias whose name another generated alias or Type already has is renamed through the name table and reported, like any other collision (D-011).
+  - **A `Type` name that more than one generated module defines** (two headers with the same struct name) is written module-qualified at **every** use, with or without `--qualify-outside`: unqualified it does not compile. The report lists such names.
+  - Package clashes need nothing: a local `Type` shadows a package's (D-064 (2)), and the package's stays reachable as `<package>.<Type>`.
+  - A `Type` named like a module is allowed (warning TB0033 only).
+  - 27.0 and 28.0 get their sub-tasks with these rules.
+- Rationale: generated code must compile; the spike shows which spellings tB accepts, so tbBlob uses those and never emits the two that fail (a module-qualified alias, an ambiguous unqualified Type).
+- Alternatives considered: emitting outside aliases as one-field `Type`s so they can be module-qualified (changes how handles pass: a `Type` goes `ByRef`, a handle must go by value); qualifying aliases with the project name (the project name is the user's `--name`, and unqualified aliases are already unique once each is declared once).

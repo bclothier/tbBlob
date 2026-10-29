@@ -1,0 +1,135 @@
+' SPIKE-11 throwaway (D-054): can generated code name an outside type through its header-named
+' module (wingdi.tagLOGFONTW, HDC), and how do same-named types resolve between local
+' modules and a referenced package? LenB tells which Type a name resolved to. Forms that might not
+' compile are probed separately (variants\, compile-only, see build-project.ps1).
+' Aliases are file-scope only (a Module rejects Public Alias), so the alias targets are here.
+Public Alias FONT_ALIAS As wingdi.tagLOGFONTW
+Public Alias DC_ALIAS As HDC
+
+Module Probe
+    ' (1) qualified names in Declares: a parameter; a file-scope alias (HDC) as parameter and return
+    Private Declare PtrSafe Function GetDC Lib "user32" (ByVal hWnd As LongPtr) As HDC
+    Private Declare PtrSafe Function ReleaseDC Lib "user32" (ByVal hWnd As LongPtr, ByVal hDC As HDC) As Long
+    Private Declare PtrSafe Function GetStockObject Lib "gdi32" (ByVal i As Long) As LongPtr
+    Private Declare PtrSafe Function GetObjectW Lib "gdi32" (ByVal h As LongPtr, ByVal c As Long, ByRef pv As wingdi.tagLOGFONTW) As Long
+    Private Declare PtrSafe Sub CopyFont Lib "kernel32" Alias "RtlMoveMemory" (ByRef dst As wingdi.tagLOGFONTW, ByRef src As wingdi.tagLOGFONTW, ByVal n As LongPtr)
+    Private Const DEFAULT_GUI_FONT As Long = 17
+
+    ' (5) a handle as a one-field Type (winhandles.HDC_T), passed and returned by value
+    Private Declare PtrSafe Function GetDC_T Lib "user32" Alias "GetDC" (ByVal hWnd As LongPtr) As winhandles.HDC_T
+    Private Declare PtrSafe Function ReleaseDC_T Lib "user32" Alias "ReleaseDC" (ByVal hWnd As LongPtr, ByVal hDC As winhandles.HDC_T) As Long
+    Private Declare PtrSafe Function GetDeviceCaps_T Lib "gdi32" Alias "GetDeviceCaps" (ByVal hDC As winhandles.HDC_T, ByVal index As Long) As Long
+    Private Declare PtrSafe Function GetDeviceCaps Lib "gdi32" (ByVal hDC As HDC, ByVal index As Long) As Long
+    Private Const LOGPIXELSX As Long = 88
+    Public Delegate Function HandleCb (ByVal h As winhandles.HDC_T) As LongPtr
+
+    ' (1) qualified names as Type fields and Alias targets; (2) both SAMENAMEs as fields
+    Public Type HOLDER
+        font As wingdi.tagLOGFONTW
+        dc As HDC
+        localSame As local_a.SAMENAME
+        pkgSame As pkgtypes.SAMENAME
+    End Type
+
+    ' (4) qualified names in a Delegate signature
+    Public Delegate Function FontCb (ByRef f As wingdi.tagLOGFONTW, ByVal dc As HDC, ByRef s As pkgtypes.SAMENAME) As Long
+
+    ' (1) a qualified Type as a function return
+    Private Function MakeFont(ByVal height As Long) As wingdi.tagLOGFONTW
+        Dim f As wingdi.tagLOGFONTW
+        f.lfHeight = height
+        Return f
+    End Function
+
+    Private Function HandleCbImpl(ByVal h As winhandles.HDC_T) As LongPtr
+        Return h.Value
+    End Function
+
+    Private Function FontCbImpl(ByRef f As wingdi.tagLOGFONTW, ByVal dc As HDC, ByRef s As pkgtypes.SAMENAME) As Long
+        Return f.lfHeight + s.a
+    End Function
+
+    Private Function FaceName(f As wingdi.tagLOGFONTW) As String
+        Dim i As Long, s As String
+        For i = 0 To 31
+            If f.lfFaceName(i) = 0 Then Exit For
+            s &= ChrW$(f.lfFaceName(i) And &HFFFF&)
+        Next
+        Return s
+    End Function
+
+    Public Sub Main()
+        Results.Start
+        Dim p As LongPtr
+        Results.Info "0.arch", Results.Arch() & " LenB(LongPtr)=" & LenB(p)
+
+        ' ---- (1) module-qualified outside types --------------------------------------------
+        Dim lf As wingdi.tagLOGFONTW
+        Results.CheckEq "1.LenB(wingdi.tagLOGFONTW)", LenB(lf), 92
+        Dim got As Long = GetObjectW(GetStockObject(DEFAULT_GUI_FONT), LenB(lf), lf)
+        Results.Check "1.Declare ByRef wingdi.tagLOGFONTW filled by gdi32 GetObjectW", got = 92 And lf.lfHeight <> 0 And Len(FaceName(lf)) > 0, _
+            "returned " & got & ", lfHeight=" & lf.lfHeight & ", face=" & FaceName(lf)
+        Dim copy As wingdi.tagLOGFONTW
+        CopyFont copy, lf, LenB(lf)
+        Results.Check "1.Declare with two ByRef wingdi.tagLOGFONTW (RtlMoveMemory)", copy.lfHeight = lf.lfHeight And FaceName(copy) = FaceName(lf)
+        Dim dc As HDC = GetDC(0)
+        Results.Check "1.Declare returning the file-scope alias HDC (GetDC)", dc <> 0, CStr(dc)
+        Results.CheckEq "1.Declare taking HDC (ReleaseDC)", ReleaseDC(0, dc), 1
+        Results.CheckEq "1.LenB(HDC) is the pointer size", LenB(dc), LenB(p)
+        Results.CheckEq "1.function returning wingdi.tagLOGFONTW", MakeFont(-13).lfHeight, -13
+        Dim hd As HOLDER
+        hd.font = lf
+        hd.dc = dc
+        Results.Check "1.Type fields of qualified types", hd.font.lfHeight = lf.lfHeight And hd.dc = dc
+        Results.Info "1.LenB(HOLDER)", CStr(LenB(hd))
+        Dim fa As FONT_ALIAS
+        Dim da As DC_ALIAS
+        Results.CheckEq "1.Alias to wingdi.tagLOGFONTW", LenB(fa), 92
+        Results.CheckEq "1.Alias to an alias (HDC)", LenB(da), LenB(p)
+
+        ' ---- (2) a local Type shadowing the package's -------------------------------------
+        Dim s As SAMENAME
+        Dim sl As local_a.SAMENAME
+        Dim sp As pkgtypes.SAMENAME
+        Dim po As PKGONLY
+        Results.CheckEq "2.unqualified SAMENAME is the local module's (8 bytes)", LenB(s), 8
+        Results.CheckEq "2.local_a.SAMENAME (8 bytes)", LenB(sl), 8
+        Results.CheckEq "2.pkgtypes.SAMENAME is the package's (4 bytes)", LenB(sp), 4
+        Results.CheckEq "2.a package-only Type unqualified (12 bytes)", LenB(po), 12
+        Dim spq As ShadowPkg.pkgtypes.SAMENAME
+        Dim spp As ShadowPkg.SAMENAME
+        Results.CheckEq "2.ShadowPkg.pkgtypes.SAMENAME is the package's (4 bytes)", LenB(spq), 4
+        Results.CheckEq "2.ShadowPkg.SAMENAME is the package's (4 bytes)", LenB(spp), 4
+        Dim ql As qualprobe.SAMENAME
+        Results.CheckEq "2.qualprobe.SAMENAME (project-qualified) is the local one (8 bytes)", LenB(ql), 8
+        Dim qh As qualprobe.HDC
+        Results.CheckEq "1.file-scope alias qualified by the project, qualprobe.HDC", LenB(qh), LenB(p)
+        Results.CheckEq "2.both in one Type: local field", LenB(hd.localSame), 8
+        Results.CheckEq "2.both in one Type: package field", LenB(hd.pkgSame), 4
+
+        ' ---- (3) two local modules with the same Type name -----------------------------------
+        Dim t1 As dup1.TWICE
+        Dim t2 As dup2.TWICE
+        Results.CheckEq "3.dup1.TWICE (4 bytes)", LenB(t1), 4
+        Results.CheckEq "3.dup2.TWICE (16 bytes)", LenB(t2), 16
+
+        ' ---- (4) qualified types in a Delegate ------------------------------------------------
+        Dim cb As FontCb = AddressOf FontCbImpl
+        sp.a = 5
+        Results.CheckEq "4.Delegate with qualified parameter types, called", cb(lf, dc, sp), lf.lfHeight + 5
+
+        ' ---- (5) a handle as a one-field Type ------------------------------------------------
+        Dim dt As winhandles.HDC_T = GetDC_T(0)
+        Results.Check "5.Declare returning a one-field Type handle (GetDC)", dt.Value <> 0, CStr(dt.Value)
+        Results.CheckEq "5.LenB is the pointer size", LenB(dt), LenB(p)
+        Dim dpi As Long = GetDeviceCaps_T(dt, LOGPIXELSX)
+        Results.Check "5.passed ByVal into GetDeviceCaps, the same answer as the alias form", dpi > 0 And dpi = GetDeviceCaps(dt.Value, LOGPIXELSX), CStr(dpi)
+        Dim hcb As HandleCb = AddressOf HandleCbImpl
+        Results.Check "5.by value through a Delegate", hcb(dt) = dt.Value
+        Dim nul As winhandles.HDC_T
+        Results.CheckEq "5.a zeroed Type passes NULL (GetDeviceCaps(NULL) = 0)", GetDeviceCaps_T(nul, LOGPIXELSX), 0
+        Results.CheckEq "5.ReleaseDC through it", ReleaseDC_T(0, dt), 1
+
+        Results.Info "0.summary", "passed=" & Results.Passed & " failed=" & Results.Failed
+    End Sub
+End Module

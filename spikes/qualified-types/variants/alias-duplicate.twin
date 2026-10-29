@@ -1,0 +1,10 @@
+' SPIKE-11 compile-only variant: a second file declares the file-scope alias HDC again (two outside
+' headers that both typedef the same name).
+Public Alias HDC As LongPtr
+
+Module VariantUse
+    Public Sub UseIt()
+        Dim h As HDC
+        Debug.Print LenB(h)
+    End Sub
+End Module

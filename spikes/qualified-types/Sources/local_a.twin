@@ -1,0 +1,7 @@
+' SPIKE-11: a local Type with the same name as one in the referenced package ShadowPkg (4 bytes there).
+Module local_a
+    Public Type SAMENAME
+        a As Long
+        b As Long
+    End Type
+End Module

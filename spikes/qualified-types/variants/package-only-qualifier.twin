@@ -1,0 +1,7 @@
+' SPIKE-11 compile-only variant (2): the package's Type qualified with the package name alone.
+Module VariantUse
+    Public Sub UseIt()
+        Dim t As ShadowPkg.SAMENAME
+        Debug.Print LenB(t)
+    End Sub
+End Module

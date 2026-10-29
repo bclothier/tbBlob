@@ -1,0 +1,13 @@
+{
+	"configuration.inherits": "Defaults",
+	"project.appTitle": "ShadowPkg",
+	"project.buildPath": "${SourcePath}\\Build\\${ProjectName}.${FileExtension}",
+	"project.buildType": "Package TWINPACK",
+	"project.description": "SPIKE-11 package: a Type the project shadows (throwaway)",
+	"project.exportPathIsV2": true,
+	"project.id": "{90950380-533C-4D8B-8C50-2FDCCE79C5E8}",
+	"project.name": "ShadowPkg",
+	"project.optionExplicit": true,
+	"project.references": [],
+	"project.settingsVersion": 1
+}

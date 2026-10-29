@@ -1,0 +1,12 @@
+' SPIKE-11: the referenced package's types. SAMENAME is shadowed by the project's local_a.SAMENAME.
+Module pkgtypes
+    Public Type SAMENAME
+        a As Long
+    End Type
+
+    Public Type PKGONLY
+        x As Long
+        y As Long
+        z As Long
+    End Type
+End Module

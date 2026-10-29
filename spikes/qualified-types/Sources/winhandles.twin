@@ -1,0 +1,7 @@
+' SPIKE-11 follow-up (the user, 2026-10-28): a handle as a one-field Type instead of an alias, so it
+' lives in a module and can be module-qualified.
+Module winhandles
+    Public Type HDC_T
+        Value As LongPtr
+    End Type
+End Module

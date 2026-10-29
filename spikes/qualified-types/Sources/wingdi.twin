@@ -1,0 +1,20 @@
+' SPIKE-11: an outside struct imported into a header-named module, as D-054 plans (um\wingdi.h).
+Module wingdi
+    ' C: struct tagLOGFONTW (92 bytes on x86 and x64)
+    Public Type tagLOGFONTW
+        lfHeight As Long
+        lfWidth As Long
+        lfEscapement As Long
+        lfOrientation As Long
+        lfWeight As Long
+        lfItalic As Byte
+        lfUnderline As Byte
+        lfStrikeOut As Byte
+        lfCharSet As Byte
+        lfOutPrecision As Byte
+        lfClipPrecision As Byte
+        lfQuality As Byte
+        lfPitchAndFamily As Byte
+        lfFaceName(0 To 31) As Integer
+    End Type
+End Module

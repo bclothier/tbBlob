@@ -1,0 +1,9 @@
+' SPIKE-11 follow-up, compile-only: the second file-scope Private Alias PH.
+Private Alias PH As LongPtr
+
+Module pa2
+    Public Function Size2() As Long
+        Dim x As PH
+        Return LenB(x)
+    End Function
+End Module

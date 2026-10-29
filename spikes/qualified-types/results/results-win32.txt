@@ -1,0 +1,32 @@
+INFO 0.arch | win32 LenB(LongPtr)=4
+PASS 1.LenB(wingdi.tagLOGFONTW) | actual=92 expected=92
+PASS 1.Declare ByRef wingdi.tagLOGFONTW filled by gdi32 GetObjectW | returned 92, lfHeight=-11, face=MS Shell Dlg
+PASS 1.Declare with two ByRef wingdi.tagLOGFONTW (RtlMoveMemory)
+PASS 1.Declare returning the file-scope alias HDC (GetDC) | 553719537
+PASS 1.Declare taking HDC (ReleaseDC) | actual=1 expected=1
+PASS 1.LenB(HDC) is the pointer size | actual=4 expected=4
+PASS 1.function returning wingdi.tagLOGFONTW | actual=-13 expected=-13
+PASS 1.Type fields of qualified types
+INFO 1.LenB(HOLDER) | 108
+PASS 1.Alias to wingdi.tagLOGFONTW | actual=92 expected=92
+PASS 1.Alias to an alias (HDC) | actual=4 expected=4
+PASS 2.unqualified SAMENAME is the local module's (8 bytes) | actual=8 expected=8
+PASS 2.local_a.SAMENAME (8 bytes) | actual=8 expected=8
+PASS 2.pkgtypes.SAMENAME is the package's (4 bytes) | actual=4 expected=4
+PASS 2.a package-only Type unqualified (12 bytes) | actual=12 expected=12
+PASS 2.ShadowPkg.pkgtypes.SAMENAME is the package's (4 bytes) | actual=4 expected=4
+PASS 2.ShadowPkg.SAMENAME is the package's (4 bytes) | actual=4 expected=4
+PASS 2.qualprobe.SAMENAME (project-qualified) is the local one (8 bytes) | actual=8 expected=8
+PASS 1.file-scope alias qualified by the project, qualprobe.HDC | actual=4 expected=4
+PASS 2.both in one Type: local field | actual=8 expected=8
+PASS 2.both in one Type: package field | actual=4 expected=4
+PASS 3.dup1.TWICE (4 bytes) | actual=4 expected=4
+PASS 3.dup2.TWICE (16 bytes) | actual=16 expected=16
+PASS 4.Delegate with qualified parameter types, called | actual=-6 expected=-6
+PASS 5.Declare returning a one-field Type handle (GetDC) | 553719537
+PASS 5.LenB is the pointer size | actual=4 expected=4
+PASS 5.passed ByVal into GetDeviceCaps, the same answer as the alias form | 96
+PASS 5.by value through a Delegate
+PASS 5.a zeroed Type passes NULL (GetDeviceCaps(NULL) = 0) | actual=0 expected=0
+PASS 5.ReleaseDC through it | actual=1 expected=1
+INFO 0.summary | passed=29 failed=0

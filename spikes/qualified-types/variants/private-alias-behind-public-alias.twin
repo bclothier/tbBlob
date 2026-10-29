@@ -1,0 +1,16 @@
+' SPIKE-11 follow-up, compile-only: a file-scope Private Alias used by a file-scope Public Alias in
+' the same file, and a file-scope Public Type with a field of it.
+Private Alias PH As LongPtr
+Public Alias PUBH As PH
+
+Public Type FILESCOPE_T
+    Value As PH
+End Type
+
+Module VariantUse
+    Public Sub UseIt()
+        Dim a As PUBH
+        Dim b As FILESCOPE_T
+        Debug.Print LenB(a), LenB(b)
+    End Sub
+End Module

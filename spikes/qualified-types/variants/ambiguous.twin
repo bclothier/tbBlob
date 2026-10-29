@@ -1,0 +1,7 @@
+' SPIKE-11 compile-only variant (3): TWICE unqualified, while dup1 and dup2 both define it.
+Module VariantUse
+    Public Sub UseIt()
+        Dim t As TWICE
+        Debug.Print LenB(t)
+    End Sub
+End Module

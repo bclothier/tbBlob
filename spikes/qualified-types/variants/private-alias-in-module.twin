@@ -1,0 +1,9 @@
+' SPIKE-11 follow-up, compile-only: a Private Alias inside a Module (Public Alias there is TB5182).
+Module VariantUse
+    Private Alias PH As LongPtr
+
+    Public Sub UseIt()
+        Dim x As PH
+        Debug.Print LenB(x)
+    End Sub
+End Module

@@ -1,0 +1,8 @@
+' SPIKE-11 follow-up, compile-only: passing vbNullPtr where a one-field Type handle is expected.
+Module VariantUse
+    Private Declare PtrSafe Function RDC Lib "user32" Alias "ReleaseDC" (ByVal hWnd As LongPtr, ByVal hDC As winhandles.HDC_T) As Long
+
+    Public Sub UseIt()
+        Debug.Print RDC(0, vbNullPtr)
+    End Sub
+End Module
