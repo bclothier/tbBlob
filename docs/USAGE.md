@@ -183,6 +183,9 @@ loading them, then one section per kind of finding. Each entry gives its reason:
   A member whose type is an anonymous struct gets a `Type` named after it, `<union>_<member>`
   (`_cairo_path_data_t_header`): read it whole (`Dim h As _cairo_path_data_t_header = d.header`),
   change it, and assign it back.
+  Copy an array element into a variable before using its accessors (`pd = data(i)`, then
+  `pd.header`). Calling a Type's method directly on an array element (`data(i).header`) is not
+  safe: it was tested on twinBASIC BETA 1011 and shown to crash (D-069).
 - **Bitfields** are one storage field per group. Mask and shift to reach the bits; the comment says
   which bits are which.
 - **Variadic functions** (`...`) use `ByVal ParamArray args As Any()`. Pass variables as `ByVal x`,

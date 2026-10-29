@@ -1,17 +1,40 @@
-' Runtime checks of the cairo 1.18.4 bindings that tbBlob generated (task 29; D-055).
+' Runtime checks of the cairo 1.18.4 bindings that tbBlob generated (tasks 29, 30; D-055).
 ' Each group runs under its own error handler, so an error is a FAIL line, not the end of the run.
 ' Results.twin and Utf8.twin are shared with tests\harness-fixture. Memory is read with tB's native
 ' vbaCopyBytes (D-067).
 Module Harness
     Private Declare PtrSafe Function GetModuleFileNameW Lib "kernel32" (ByVal hModule As LongPtr, ByVal lpFilename As LongPtr, ByVal nSize As Long) As Long
     Private Declare PtrSafe Function GetModuleHandleW Lib "kernel32" (ByVal lpModuleName As LongPtr) As LongPtr
+    ' GDI, for the Win32 group: a memory DC (an HDC: the generated handle alias)
+    Private Declare PtrSafe Function CreateCompatibleDC Lib "gdi32" (ByVal hdc As HDC) As HDC
+    Private Declare PtrSafe Function DeleteDC Lib "gdi32" (ByVal hdc As HDC) As Long
+    ' FreeType (freetype.dll, loaded as cairo's dependency): FT_Face and FT_Library are the generated aliases
+    Private Declare PtrSafe Function FT_Init_FreeType CDecl Lib "freetype.dll" (ByRef alibrary As FT_Library) As Long
+    Private Declare PtrSafe Function FT_New_Face CDecl Lib "freetype.dll" (ByVal library As FT_Library, ByVal filepathname As LongPtr, ByVal face_index As Long, ByRef aface As FT_Face) As Long
+    Private Declare PtrSafe Function FT_Done_Face CDecl Lib "freetype.dll" (ByVal face As FT_Face) As Long
+    Private Declare PtrSafe Function FT_Done_FreeType CDecl Lib "freetype.dll" (ByVal library As FT_Library) As Long
+    ' DirectWrite and COM vtable calls, for the hand-written cairo_dwrite.twin (D-059)
+    Private Type GUID_T
+        Data1 As Long
+        Data2 As Integer
+        Data3 As Integer
+        Data4(0 To 7) As Byte
+    End Type
+    Private Declare PtrSafe Function IIDFromString Lib "ole32" (ByVal lpsz As LongPtr, ByRef lpiid As GUID_T) As Long
+    Private Declare PtrSafe Function DWriteCreateFactory Lib "dwrite" (ByVal factoryType As Long, ByRef iid As GUID_T, ByRef factory As LongPtr) As Long
+    Private Declare PtrSafe Function DispCallFunc Lib "oleaut32" (ByVal pvInstance As LongPtr, ByVal oVft As LongPtr, ByVal cc As Long, ByVal vtReturn As Integer, _
+        ByVal cActuals As Long, ByRef prgvt As Integer, ByRef prgpvarg As LongPtr, ByRef pvargResult As Variant) As Long
 
-    Private Const GROUPS As Long = 1
+    Private Const GROUPS As Long = 11
     #If Win64 Then
         Private Const VCPKG_BIN As String = "\cairo\vcpkg_installed\x64-windows\bin"
     #Else
         Private Const VCPKG_BIN As String = "\cairo\vcpkg_installed_x86\x86-windows\bin"
     #End If
+
+    Private mPngBytes As Long           ' bytes the PNG stream callback received
+    Private mPngHead As Long            ' its first four bytes
+    Private mCsiSurface As cairo_surface_t  ' the surface the script interpreter's hook created
 
     Public Sub Main()
         Results.Start
@@ -32,6 +55,16 @@ Module Harness
         On Error GoTo failed
         Select Case g
             Case 1: Layout
+            Case 2: ImageSurface
+            Case 3: Paths
+            Case 4: StructsOut
+            Case 5: Png
+            Case 6: PdfAndSvg
+            Case 7: Win32Surface
+            Case 8: FreeTypeFace
+            Case 9: ScriptInterpreter
+            Case 10: Errors
+            Case 11: DirectWrite
         End Select
         Exit Sub
     failed:
@@ -50,6 +83,72 @@ Module Harness
         Dim buf As String = String$(1024, vbNullChar)
         Dim n As Long = GetModuleFileNameW(h, StrPtr(buf), 1024)
         Return Left$(buf, n)
+    End Function
+
+    ' The ARGB32 pixel (premultiplied, native order) at x, y of an image surface.
+    Private Function Pixel(ByVal surface As cairo_surface_t, ByVal x As Long, ByVal y As Long) As Long
+        cairo_surface_flush surface
+        Dim v As Long
+        vbaCopyBytes 4, VarPtr(v), cairo_image_surface_get_data(surface) + y * cairo_image_surface_get_stride(surface) + x * 4
+        Return v
+    End Function
+
+    ' A temp file name for this architecture: %TEMP%\tbBlob-cairo-<arch>.<ext>.
+    Private Function TempFile(ByVal ext As String) As String
+        Return Environ$("TEMP") & "\tbBlob-cairo-" & Results.Arch() & "." & ext
+    End Function
+
+    ' The first n bytes of a file, as text (Latin-1).
+    Private Function FileHead(ByVal path As String, ByVal n As Long) As String
+        Dim f As Integer = FreeFile
+        Open path For Binary Access Read As #f
+        If LOF(f) < n Then n = LOF(f)
+        Dim b() As Byte
+        ReDim b(0 To n - 1)
+        Get #f, 1, b
+        Close #f
+        Dim s As String, i As Long
+        For i = 0 To n - 1
+            s &= Chr$(b(i))
+        Next
+        Return s
+    End Function
+
+    Private Sub RemoveFile(ByVal path As String)
+        On Error Resume Next
+        Kill path
+    End Sub
+
+    ' The text extents of s in cr's current font.
+    Private Function Extents(ByVal cr As cairo_t, ByVal s As String) As cairo_text_extents_t
+        Dim b() As Byte = Utf8.ToUtf8(s)
+        Dim e As cairo_text_extents_t
+        cairo_text_extents cr, VarPtr(b(0)), e
+        Return e
+    End Function
+
+    ' Calls method index (0 = QueryInterface) of a COM object through its vtable, stdcall, with
+    ' LongPtr/Long arguments; returns the HRESULT.
+    Private Function ComCall(ByVal obj As LongPtr, ByVal index As Long, ParamArray args() As Variant) As Long
+        Dim n As Long = UBound(args) - LBound(args) + 1
+        Dim vt() As Integer, pv() As LongPtr, vals() As Variant, i As Long
+        If n > 0 Then
+            ReDim vt(0 To n - 1)
+            ReDim pv(0 To n - 1)
+            ReDim vals(0 To n - 1)
+            For i = 0 To n - 1
+                vals(i) = args(LBound(args) + i)
+                vt(i) = VarType(vals(i))
+                pv(i) = VarPtr(vals(i))
+            Next
+        Else
+            ReDim vt(0 To 0)
+            ReDim pv(0 To 0)
+        End If
+        Dim result As Variant
+        Dim hr As Long = DispCallFunc(obj, index * LenB(obj), 4, vbLong, n, vt(0), pv(0), result)    ' 4 = CC_STDCALL
+        If hr <> 0 Then Return hr
+        Return result
     End Function
 
     ' ---- 0. both DLLs loaded through the generated loader (D-053), version --------------------
@@ -73,5 +172,260 @@ Module Harness
     Private Sub Layout()
         Dim mismatches As String = Cairo_LayoutCheck.LayoutMismatches()
         Results.Check "1.layout every generated Type matches CastXML", Len(mismatches) = 0, Replace(mismatches, vbLf, "; ")
+    End Sub
+
+    ' ---- 2. image surface: draw, read a pixel through get_data + get_stride ---------------------
+    Private Sub ImageSurface()
+        Dim s As cairo_surface_t = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 64, 64)
+        Results.CheckEq "2.image_surface_create ARGB32 64x64", cairo_surface_status(s), CAIRO_STATUS_SUCCESS
+        Dim cr As cairo_t = cairo_create(s)
+        cairo_set_source_rgb cr, 1, 0, 0
+        cairo_rectangle cr, 8, 8, 16, 16
+        cairo_fill cr
+        Results.Check "2.stride covers a row", cairo_image_surface_get_stride(s) >= 64 * 4, CStr(cairo_image_surface_get_stride(s))
+        Results.CheckEq "2.pixel inside the filled rectangle is opaque red", Hex$(Pixel(s, 10, 10)), "FFFF0000"
+        Results.CheckEq "2.pixel outside it is transparent", Pixel(s, 40, 40), 0
+        cairo_destroy cr
+        cairo_surface_destroy s
+    End Sub
+
+    ' ---- 3. paths: cairo_path_t and cairo_path_data_t's union of anonymous structs (D-068) ------
+    Private Sub Paths()
+        Dim s As cairo_surface_t = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 16, 16)
+        Dim cr As cairo_t = cairo_create(s)
+        cairo_move_to cr, 1, 2
+        cairo_line_to cr, 3, 4
+        Dim pp As LongPtr = cairo_copy_path(cr)
+        Dim path As cairo_path_t
+        vbaCopyBytes LenB(path), VarPtr(path), pp
+        Results.CheckEq "3.copy_path status", path.status, CAIRO_STATUS_SUCCESS
+        Results.CheckEq "3.num_data (move_to + line_to, a header and a point each)", path.num_data, 4
+        ' Each element is copied into one variable before its accessors are used: calling a method of
+        ' a Type directly on an array element is not safe (shown to crash when tested on tB BETA 1011, D-069).
+        Dim pd As _cairo_path_data_t
+        vbaCopyBytes LenB(pd), VarPtr(pd), path.data
+        Dim h0 As _cairo_path_data_t_header = pd.header
+        vbaCopyBytes LenB(pd), VarPtr(pd), path.data + LenB(pd)
+        Dim p1 As _cairo_path_data_t_point = pd.point
+        vbaCopyBytes LenB(pd), VarPtr(pd), path.data + 2 * LenB(pd)
+        Dim h2 As _cairo_path_data_t_header = pd.header
+        vbaCopyBytes LenB(pd), VarPtr(pd), path.data + 3 * LenB(pd)
+        Dim p3 As _cairo_path_data_t_point = pd.point
+        Results.Check "3.header accessor: MOVE_TO, length 2", h0.type = CAIRO_PATH_MOVE_TO And h0.length = 2, h0.type & "," & h0.length
+        Results.Check "3.point accessor: (1, 2)", p1.x = 1 And p1.y = 2, p1.x & "," & p1.y
+        Results.Check "3.second header: LINE_TO", h2.type = CAIRO_PATH_LINE_TO And h2.length = 2, h2.type & "," & h2.length
+        Results.Check "3.second point: (3, 4)", p3.x = 3 And p3.y = 4, p3.x & "," & p3.y
+        cairo_path_destroy ByVal pp      ' the ByRef parameter takes cairo's own pointer
+        Results.Check "3.path_destroy returned", True
+        cairo_destroy cr
+        cairo_surface_destroy s
+    End Sub
+
+    ' ---- 4. structs filled by cairo: text extents, matrix, clip rectangle list -----------------
+    Private Sub StructsOut()
+        Dim s As cairo_surface_t = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 64, 64)
+        Dim cr As cairo_t = cairo_create(s)
+        Dim family() As Byte = Utf8.ToUtf8("Arial")
+        cairo_select_font_face cr, VarPtr(family(0)), CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL
+        cairo_set_font_size cr, 20
+        Dim e As cairo_text_extents_t = Extents(cr, "Hello")
+        Results.Check "4.text_extents (ByRef cairo_text_extents_t)", e.width > 0 And e.x_advance > 0, e.width & ", " & e.x_advance
+        cairo_scale cr, 2, 3
+        Dim m As cairo_matrix_t
+        cairo_get_matrix cr, m
+        Results.Check "4.get_matrix after scale(2, 3)", m.xx = 2 And m.yy = 3 And m.xy = 0 And m.yx = 0, m.xx & "," & m.yy
+        Dim x As Double = 1, y As Double = 1
+        cairo_matrix_transform_point m, x, y
+        Results.Check "4.matrix_transform_point (ByRef Double in/out)", x = 2 And y = 3, x & "," & y
+        cairo_destroy cr
+        cr = cairo_create(s)
+        cairo_rectangle cr, 5, 6, 7, 8
+        cairo_clip cr
+        Dim lp As LongPtr = cairo_copy_clip_rectangle_list(cr)
+        Dim list As cairo_rectangle_list_t
+        vbaCopyBytes LenB(list), VarPtr(list), lp
+        Results.Check "4.copy_clip_rectangle_list: one rectangle", list.status = CAIRO_STATUS_SUCCESS And list.num_rectangles = 1, list.status & "," & list.num_rectangles
+        Dim r As cairo_rectangle_t
+        vbaCopyBytes LenB(r), VarPtr(r), list.rectangles
+        Results.Check "4.the clip rectangle (5, 6, 7, 8)", r.x = 5 And r.y = 6 And r.width = 7 And r.height = 8, r.x & "," & r.y & "," & r.width & "," & r.height
+        cairo_rectangle_list_destroy ByVal lp
+        cairo_destroy cr
+        cairo_surface_destroy s
+    End Sub
+
+    ' ---- 5. PNG: to a file and back, and to a stream through a CDecl write callback -------------
+    Private Function PngWrite CDecl(ByVal closure As LongPtr, ByVal data As LongPtr, ByVal length As Long) As cairo_status_t
+        If mPngBytes = 0 And length >= 4 Then vbaCopyBytes 4, VarPtr(mPngHead), data
+        mPngBytes += length
+        Return CAIRO_STATUS_SUCCESS
+    End Function
+
+    Private Sub Png()
+        Dim s As cairo_surface_t = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 32, 24)
+        Dim cr As cairo_t = cairo_create(s)
+        cairo_set_source_rgb cr, 0, 0, 1
+        cairo_paint cr
+        Dim file As String = TempFile("png")
+        RemoveFile file
+        Dim name() As Byte = Utf8.ToUtf8(file)
+        Results.CheckEq "5.surface_write_to_png", cairo_surface_write_to_png(s, VarPtr(name(0))), CAIRO_STATUS_SUCCESS
+        Dim back As cairo_surface_t = cairo_image_surface_create_from_png(VarPtr(name(0)))
+        Results.CheckEq "5.image_surface_create_from_png", cairo_surface_status(back), CAIRO_STATUS_SUCCESS
+        Results.Check "5.same size", cairo_image_surface_get_width(back) = 32 And cairo_image_surface_get_height(back) = 24
+        Results.CheckEq "5.same pixel (opaque blue)", Hex$(Pixel(back, 5, 5)), "FF0000FF"
+        mPngBytes = 0
+        mPngHead = 0
+        Results.CheckEq "5.surface_write_to_png_stream (CDecl write_func)", cairo_surface_write_to_png_stream(s, AddressOf PngWrite, 0), CAIRO_STATUS_SUCCESS
+        Results.CheckEq "5.the stream got the whole PNG", mPngBytes, FileLen(file)
+        Results.CheckEq "5.the stream starts with the PNG signature", Hex$(mPngHead), "474E5089"
+        cairo_surface_destroy back
+        cairo_destroy cr
+        cairo_surface_destroy s
+        RemoveFile file
+    End Sub
+
+    ' ---- 6. PDF and SVG surfaces --------------------------------------------------------------
+    Private Sub PdfAndSvg()
+        Dim ext As Variant
+        For Each ext In Array("pdf", "svg")
+            Dim file As String = TempFile(ext)
+            RemoveFile file
+            Dim name() As Byte = Utf8.ToUtf8(file)
+            Dim s As cairo_surface_t
+            If ext = "pdf" Then s = cairo_pdf_surface_create(VarPtr(name(0)), 100, 80) Else s = cairo_svg_surface_create(VarPtr(name(0)), 100, 80)
+            Dim cr As cairo_t = cairo_create(s)
+            cairo_set_source_rgb cr, 0, 0.5, 0
+            cairo_rectangle cr, 10, 10, 50, 40
+            cairo_fill cr
+            cairo_destroy cr
+            cairo_surface_finish s
+            Results.CheckEq "6." & ext & " surface status after finish", cairo_surface_status(s), CAIRO_STATUS_SUCCESS
+            cairo_surface_destroy s
+            Dim head As String = FileHead(file, 200)
+            If ext = "pdf" Then
+                Results.CheckEq "6.the PDF starts %PDF", Left$(head, 4), "%PDF"
+            Else
+                Results.Check "6.the SVG has an <svg element", InStr(head, "<svg") > 0, Left$(head, 60)
+            End If
+            RemoveFile file
+        Next
+    End Sub
+
+    ' ---- 7. Win32: a surface on a memory DC (HDC alias), a font face from a LOGFONTW -----------
+    Private Sub Win32Surface()
+        Dim dc As HDC = CreateCompatibleDC(0)
+        Results.Check "7.CreateCompatibleDC", dc <> 0
+        Dim ws As cairo_surface_t = cairo_win32_surface_create(dc)
+        Results.CheckEq "7.win32_surface_create(HDC)", cairo_surface_status(ws), CAIRO_STATUS_SUCCESS
+        Dim wcr As cairo_t = cairo_create(ws)
+        cairo_paint wcr
+        Results.CheckEq "7.paint on it", cairo_status(wcr), CAIRO_STATUS_SUCCESS
+        cairo_destroy wcr
+        cairo_surface_destroy ws
+        DeleteDC dc
+        Dim lf As tagLOGFONTW
+        lf.lfHeight = -20
+        Dim face As String = "Arial", i As Long
+        For i = 1 To Len(face)
+            lf.lfFaceName(i - 1) = AscW(Mid$(face, i, 1))
+        Next
+        Dim ff As cairo_font_face_t = cairo_win32_font_face_create_for_logfontw(lf)
+        Results.CheckEq "7.win32_font_face_create_for_logfontw (ByRef tagLOGFONTW)", cairo_font_face_status(ff), CAIRO_STATUS_SUCCESS
+        Dim s As cairo_surface_t = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 64, 64)
+        Dim cr As cairo_t = cairo_create(s)
+        cairo_set_font_face cr, ff
+        cairo_set_font_size cr, 20
+        Dim e As cairo_text_extents_t = Extents(cr, "Hello")
+        Results.Check "7.text extents in that font", e.width > 0 And e.x_advance > 0, e.width & ", " & e.x_advance
+        cairo_destroy cr
+        cairo_surface_destroy s
+        cairo_font_face_destroy ff
+    End Sub
+
+    ' ---- 8. FreeType: an FT_Face (pointer typedef alias) for a cairo font face -----------------
+    Private Sub FreeTypeFace()
+        Dim lib As FT_Library, face As FT_Face
+        Results.CheckEq "8.FT_Init_FreeType", FT_Init_FreeType(lib), 0
+        Dim font() As Byte = Utf8.ToUtf8(Environ$("WINDIR") & "\Fonts\arial.ttf")
+        Results.CheckEq "8.FT_New_Face(arial.ttf)", FT_New_Face(lib, VarPtr(font(0)), 0, face), 0
+        Dim ff As cairo_font_face_t = cairo_ft_font_face_create_for_ft_face(face, 0)
+        Results.CheckEq "8.ft_font_face_create_for_ft_face(FT_Face)", cairo_font_face_status(ff), CAIRO_STATUS_SUCCESS
+        Dim s As cairo_surface_t = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 64, 64)
+        Dim cr As cairo_t = cairo_create(s)
+        cairo_set_font_face cr, ff
+        cairo_set_font_size cr, 20
+        Dim e As cairo_text_extents_t = Extents(cr, "Hello")
+        Results.Check "8.text extents in that font", e.width > 0 And e.x_advance > 0, e.width & ", " & e.x_advance
+        cairo_destroy cr
+        cairo_surface_destroy s
+        cairo_font_face_destroy ff
+        Results.CheckEq "8.FT_Done_Face", FT_Done_Face(face), 0
+        Results.CheckEq "8.FT_Done_FreeType", FT_Done_FreeType(lib), 0
+    End Sub
+
+    ' ---- 9. script interpreter: a surface_create hook (CDecl delegate in a hooks struct) --------
+    Private Function CsiSurfaceCreate CDecl(ByVal closure As LongPtr, ByVal content As cairo_content_t, ByVal width As Double, ByVal height As Double, ByVal uid As Long) As cairo_surface_t
+        Dim s As cairo_surface_t = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, CLng(width), CLng(height))
+        mCsiSurface = cairo_surface_reference(s)
+        Return s
+    End Function
+
+    Private Sub ScriptInterpreter()
+        Dim csi As cairo_script_interpreter_t = cairo_script_interpreter_create()
+        Results.Check "9.script_interpreter_create", csi <> 0
+        Dim hooks As cairo_script_interpreter_hooks_t
+        hooks.surface_create = AddressOf CsiSurfaceCreate
+        cairo_script_interpreter_install_hooks csi, hooks
+        Dim script As String = "%!CairoScript" & vbLf & _
+            "<< /content //COLOR_ALPHA /width 16 /height 16 >> surface context" & vbLf & _
+            "1 0 0 rgb set-source paint" & vbLf & "pop" & vbLf
+        Dim b() As Byte = Utf8.ToUtf8(script)
+        Results.CheckEq "9.feed_string", cairo_script_interpreter_feed_string(csi, VarPtr(b(0)), UBound(b)), CAIRO_STATUS_SUCCESS
+        Results.CheckEq "9.finish", cairo_script_interpreter_finish(csi), CAIRO_STATUS_SUCCESS
+        Results.CheckEq "9.destroy", cairo_script_interpreter_destroy(csi), CAIRO_STATUS_SUCCESS
+        Results.Check "9.the hook created the surface", mCsiSurface <> 0
+        If mCsiSurface <> 0 Then
+            Results.CheckEq "9.the script painted it red", Hex$(Pixel(mCsiSurface, 3, 3)), "FFFF0000"
+            cairo_surface_destroy mCsiSurface
+        End If
+    End Sub
+
+    ' ---- 10. errors: status strings and an invalid surface -----------------------------------
+    Private Sub Errors()
+        Results.CheckEq "10.status_to_string(NO_MEMORY)", Utf8.FromUtf8(cairo_status_to_string(CAIRO_STATUS_NO_MEMORY)), "out of memory"
+        Dim s As cairo_surface_t = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, -1, -1)
+        Results.CheckEq "10.a negative size gives INVALID_SIZE", cairo_surface_status(s), CAIRO_STATUS_INVALID_SIZE
+        cairo_surface_destroy s
+    End Sub
+
+    ' ---- 11. DirectWrite through the hand-written cairo_dwrite.twin (D-059) ------------------
+    Private Sub DirectWrite()
+        Dim iid As GUID_T
+        IIDFromString StrPtr("{b859ee5a-d838-4b5b-a2e8-1adc7d93db48}"), iid      ' IID_IDWriteFactory
+        Dim factory As LongPtr, fontFile As LongPtr, fontFace As LongPtr
+        Results.CheckEq "11.DWriteCreateFactory", DWriteCreateFactory(0, iid, factory), 0
+        If factory = 0 Then Exit Sub
+        ' IDWriteFactory vtable: 3 IUnknown, then GetSystemFontCollection (3) ... CreateFontFileReference (7), CreateFontFace (9)
+        Dim path As String = Environ$("WINDIR") & "\Fonts\arial.ttf"
+        Results.CheckEq "11.CreateFontFileReference(arial.ttf)", ComCall(factory, 7, StrPtr(path), CLngPtr(0), VarPtr(fontFile)), 0
+        Results.CheckEq "11.CreateFontFace (TrueType)", ComCall(factory, 9, CLng(1), CLng(1), VarPtr(fontFile), CLng(0), CLng(0), VarPtr(fontFace)), 0
+        If fontFace <> 0 Then
+            Dim ff As cairo_font_face_t = cairo_dwrite_font_face_create_for_dwrite_fontface(fontFace)
+            Results.CheckEq "11.dwrite_font_face_create_for_dwrite_fontface (LongPtr /* IDWriteFontFace */)", cairo_font_face_status(ff), CAIRO_STATUS_SUCCESS
+            cairo_dwrite_font_face_set_measuring_mode ff, DWRITE_MEASURING_MODE_GDI_CLASSIC
+            Results.CheckEq "11.measuring mode reads back", cairo_dwrite_font_face_get_measuring_mode(ff), DWRITE_MEASURING_MODE_GDI_CLASSIC
+            Dim s As cairo_surface_t = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 64, 64)
+            Dim cr As cairo_t = cairo_create(s)
+            cairo_set_font_face cr, ff
+            cairo_set_font_size cr, 20
+            Dim e As cairo_text_extents_t = Extents(cr, "Hello")
+            Results.Check "11.text extents in that font", e.width > 0 And e.x_advance > 0, e.width & ", " & e.x_advance
+            cairo_destroy cr
+            cairo_surface_destroy s
+            cairo_font_face_destroy ff
+            ComCall fontFace, 2      ' Release
+        End If
+        If fontFile <> 0 Then ComCall fontFile, 2
+        ComCall factory, 2
     End Sub
 End Module

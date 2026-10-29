@@ -85,6 +85,7 @@
 | D-066 | 27.0 | Task-only | Outside types as built: one walk, alias kinds from typedefs, integration tests instead of snapshots | Superseded (partial) by D-067 |
 | D-067 | 28.0 | Task-only | Union accessors copy with tB's native vbaCopyBytes, not a RtlMoveMemory Declare | Active |
 | D-068 | 29.0 | Task-only | Gaps cairo showed: outside callback typedefs become delegates; anonymous struct types named after their field | Active |
+| D-069 | 30.0 | Project-wide | Calling a Type's method on an array element is not safe (crashed when tested on tB BETA 1011, cause not established): copy the element first; accessors unchanged | Active |
 
 ---
 ### D-001 — tB UDT layout equals C natural alignment for all 85 libgit2 structs, both archs (Task: Spike)
@@ -930,3 +931,15 @@
   - Fixture: `outlib.h` gains `OUT_HOOK_FN` (a callback typedef) in `OUT_HOOKS` and `OUT_PATH_DATA` (a union of two anonymous structs, cairo's shape), used by `tbw_call_hook`, `tbw_make_path_header`, `tbw_path_point_sum`; harness group 21 calls them on win32 and win64 (a tB `CDecl` function as the outside delegate field, called by C; the anonymous struct read and written through the union accessors).
 - Rationale: both are generic C shapes, not cairo quirks; a name derived from the field is deterministic and readable, and matches how D-018 already names union storage.
 - Alternatives considered: `LongPtr` for outside callback fields (loses the signature tB checks `AddressOf` against); numbering anonymous records (`anon_1`) (not stable across header changes, not readable).
+
+### D-069 — Calling a Type's method on an array element is not safe; copy the element first (Task 30.0)
+- Date: 2026-10-29
+- Scope: Project-wide
+- Status: Active
+- Context: the cairo harness's paths group (30.4) read cairo's `cairo_path_data_t` array into `Dim d(0 To 3) As _cairo_path_data_t` and called the generated union accessor `d(0).header`: the EXE crashed (access violation, no tB error) on win32 and win64. A minimal project with no generated code, tested on tB BETA 1011, crashed the same way: calling **any** method (`Function` or `Property Get`) of a Type on an array element crashes, for a fixed-size local, a dynamic and a module-level array alike, even for a one-field Type whose method returns `Me.a * 2`. The same call on a plain variable works; a `With d(1)` block crashes too; copying the element into a variable (`Dim one As T = d(1)`) and calling the method on that works. tbfixture and libgit2 never called an accessor on an array element, so it did not show before. The cause is not established: it may be a compiler defect, or it may follow from how an array element is passed as the method's `Me` (SAFEARRAY semantics, for example the array being locked or the element being a temporary). This entry records only what was tested and shown to crash.
+- Decision:
+  - The generator is unchanged: union accessors (D-018, D-067) stay methods of the Type, since they are correct on variables and the crash does not depend on the generated code.
+  - Code using generated unions copies an array element into a variable before calling its accessors (`docs\USAGE.md`, the unions section). The cairo harness does so in group 3, with a comment pointing here.
+  - To be raised with twinBASIC with the minimal repro (a Type with a method, an array of it, `x(1).Method()`), to learn whether it is intended or a defect. If a later tB build makes the call safe, or the cause turns out to call for a different form, this entry is superseded.
+- Rationale: emitting the accessors as module-level functions taking the Type `ByRef` would avoid the crash, but changes the API every consumer writes against (`v.header` becomes `cairo_path_data_t_header(v)`) for a crash whose cause is not yet understood.
+- Alternatives considered: module-level accessor functions (above); fields overlapping the storage instead of accessors (tB has no overlapping fields, D-018).

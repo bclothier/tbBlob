@@ -52,12 +52,27 @@ Generality (PRD goal 5): the generator contains no libgit2-specific code. The sa
 the synthetic `tbfixture` library, which holds every construct tbBlob is expected to handle, and
 takes any header folder (`tbBlob <header folder> <entry header> <dll> <output folder>`).
 
+## A second real library: cairo
+
+cairo 1.18.4 (vcpkg, tasks 29.0–30.0, D-055) was generated in one run from `cairo.h` plus its
+backend headers (pdf, ps, svg, script, tee, win32, ft, script-interpreter): 409 functions bound to
+`cairo-2.dll` and 10 to `cairo-script-interpreter-2.dll` by their export tables, types imported from
+Windows GDI and FreeType headers outside cairo's folder, and every generated Type matching CastXML on
+both architectures. `cairo-dwrite.h` is C++ only, so it is skipped and reported; a hand-written file
+covers its 5 functions (D-059). The generator needed no cairo-specific code; cairo showed two generic
+gaps (outside callback typedefs, anonymous structs inside unions), fixed with fixture cases first
+(D-068). The cairo harness (`tests\harness-cairo\`, 58 checks on win32 and win64) draws to image,
+PDF, SVG and Win32 surfaces, reads paths through the union accessors, writes PNG through a callback,
+uses Win32, FreeType and DirectWrite font faces, and runs the script interpreter with a callback in a
+hooks struct. `tests\harness-cairo\COVERAGE.md` has the breakdown.
+
 ## Limits and their workarounds
 
 | Construct | What tbBlob does | What the consumer does | Ref. |
 |---|---|---|---|
 | `__declspec(align(n))` over-aligned structs | Emits the Type with a NOTE, skips its layout check, reports it | Allocate aligned memory by hand if the library depends on the alignment | PRD §8 m.9 |
 | Unions | Storage typed by alignment, plus `Property Get/Let` accessors per member | Use the accessors (`v.as_float`), not overlapping fields | D-018 |
+| A Type's methods (union accessors) on an array element | Nothing: not safe; tested on tB BETA 1011 and shown to crash, cause not established | Copy the element into a variable, then use its accessors | D-069 |
 | Bitfields | One storage field per group of bits, with the bits named in a comment | Mask and shift the storage value | D-018 |
 | Unsigned integers | The signed tB type of the same width (same bits) | Read top-bit values as bit patterns (`&H80000000`) | D-005 |
 | Macros that aren't constants (function-like, initializers, casts to types, cycles) | Skipped, each with a reason in the report | Write the equivalent tB by hand where needed | D-021 |
@@ -77,8 +92,8 @@ takes any header folder (`tbBlob <header folder> <entry header> <dll> <output fo
 
 Function coverage at run time is about 5% (52 of 960 libgit2 functions). That is enough because the
 generator is mechanical: each *kind* of binding has been exercised on both architectures by the
-tbfixture harness, the libgit2 harness, or both. `tests\harness-fixture\COVERAGE.md` and
-`tests\harness-libgit2\COVERAGE.md` give the per-kind breakdown.
+tbfixture harness, the libgit2 harness, the cairo harness, or several. `tests\harness-fixture\COVERAGE.md`,
+`tests\harness-libgit2\COVERAGE.md` and `tests\harness-cairo\COVERAGE.md` give the per-kind breakdown.
 
 Closed since the first verdict:
 - **Callbacks invoked on a thread the library created** (SPIKE-10, task 18.0): tbfixture calls back
@@ -102,20 +117,19 @@ Things nothing exercises yet, roughly in order of risk:
 
 ## Recommended next steps
 
-1. **A second real library** (for example zlib or SQLite), to show generality beyond one codebase.
-2. **A libgit2 operation that calls back on its own threads** (for example pack indexing with
+1. **A libgit2 operation that calls back on its own threads** (for example pack indexing with
    threads enabled), to confirm the tbfixture thread result on a real library.
-3. **A `.twinpack` of generated bindings**, to close the packaging gap.
+2. **A `.twinpack` of generated bindings**, to close the packaging gap.
 
 Done since the first verdict: the threaded-callback test (18.0), `git_buf`-style ownership (19.0),
 speed (16.0, 17.0: about 2 minutes down to about 36 seconds), plus `tbBlob --check` and dependency
 messages (14.0), a distributable with the bundled CastXML (15.0, 20.0) and setup documentation by
-purpose (22.0).
+purpose (22.0), and a second real library, cairo (29.0, 30.0).
 
 ## How to reproduce
 
 ```
-powershell -ExecutionPolicy Bypass -File tests\run-all.ps1     # tests, fixture DLLs, both harnesses (win32 + win64)
+powershell -ExecutionPolicy Bypass -File tests\run-all.ps1     # tests, fixture DLLs, the three harnesses (win32 + win64)
 powershell -ExecutionPolicy Bypass -File tests\verdict.ps1     # the table above, from the current artifacts
 ```
 `run-all.ps1` regenerates harness bindings after a tbBlob rebuild. It asks for an IDE recompile of a

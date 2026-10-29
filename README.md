@@ -8,7 +8,10 @@ C compiler does, and writes a report of everything it could not express.
 It has been proven on all of libgit2 1.9.1 (951 functions, every one `git2.dll` exports and a
 header declares): the bindings compile for both
 architectures, every generated struct matches C's memory layout, and a real git workflow plus a
-clone with callbacks run through them. See `tasks\verdict-castxml-ffi-generator.md`.
+clone with callbacks run through them. A second library, cairo 1.18.4 (419 functions across two
+DLLs, with Windows GDI and FreeType types from outside its folder), draws, writes PNG, PDF and SVG,
+and renders text through Win32, FreeType and DirectWrite font faces, on both architectures. See
+`tasks\verdict-castxml-ffi-generator.md`.
 
 ## Quick start
 
