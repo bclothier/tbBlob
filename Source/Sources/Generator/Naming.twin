@@ -94,6 +94,25 @@ Module Naming
         For Each ta In map.TypeAliases()
             names.Add ta.Name, "type"
         Next
+        ' outside types (D-054) share the one name table: every alias name is project-wide (D-065)
+        Dim o As OutsideType
+        For Each o In map.OutsideTypes()
+            Select Case o.Kind
+                Case "struct"
+                    names.Add o.Name, "type"
+                    Set ignored = map.FieldsOf(o.Element)  ' registers synthesized delegates
+                Case "enum"
+                    names.Add o.Name, "type"
+                    For Each child In o.Element.childNodes
+                        If child.nodeName = "EnumValue" Then names.Add m.Attr(child, "name"), "enumvalue"
+                    Next
+                Case "handle", "opaque"
+                    names.Add o.Name, "type"
+            End Select
+        Next
+        For Each s In map.SynthDelegates
+            If Not names.IsTaken(s.Name) Then names.Add s.Name, "delegate"
+        Next
         If Not macros Is Nothing Then
             Dim mn As Variant
             For Each mn In macros.LibraryNames()

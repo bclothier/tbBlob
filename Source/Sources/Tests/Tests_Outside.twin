@@ -1,0 +1,150 @@
+' Tests for types declared outside the header folder (task 27.0; D-054, D-058, D-064, D-065):
+' classification, mapping, module placement, one alias per name, layout and x86/x64 checks, and the
+' report. Integration: the Windows SDK's XML is ~8 MB per architecture, too big to commit as a
+' snapshot, so one real run of the fixture with --also tbfixture_win.h serves every test (cached).
+Module Tests_Outside
+    Public Const MODULE_ID As Long = 13
+
+    Private mRun As String          ' the run's temp folder ("" before the first test)
+    Private mOutput As String       ' its console output
+    Private mCode As Long
+
+    Public Sub Register()
+        SelfTest.Add "outside: each reached type is classified (struct, enum, handle, opaque, com); nothing unreached is imported", MODULE_ID, 1, True
+        SelfTest.Add "outside: signatures and fields map each kind (ByRef struct, by-value struct, handle and FILE aliases, LongPtr /* IStream */)", MODULE_ID, 2, True
+        SelfTest.Add "outside: Types and Enums go into header-named modules, aliases to their file scope, each alias name once (D-065)", MODULE_ID, 3, True
+        SelfTest.Add "outside: imported records are layout-checked and compared between x86 and x64", MODULE_ID, 4, True
+        SelfTest.Add "outside: the report's 'Outside types' and 'COM interfaces' sections", MODULE_ID, 5, True
+    End Sub
+
+    Public Sub RunTest(ByVal index As Long)
+        Select Case index
+            Case 1: Kinds
+            Case 2: Mapping
+            Case 3: Placement
+            Case 4: LayoutAndArch
+            Case 5: ReportSections
+            Case Else: Err.Raise SelfTest.CHECK_FAILED, , "no test " & index & " in Tests_Outside"
+        End Select
+    End Sub
+
+    ' ---- helpers ---------------------------------------------------------------
+
+    ' The cached run: tbBlob on the fixture with --also tbfixture_win.h and -I fixture-outside.
+    Private Function RunFolder() As String
+        If Len(mRun) > 0 Then Return mRun
+        mRun = SelfTest.NewTempFolder()
+        Dim root As String = SelfTest.RepoRoot()
+        Dim args() As String = Split(root & "\tests\fixture-c|tbfixture.h|tbfixture.dll|" & mRun & "\out|--castxml|" & _
+            root & "\CastXML\vcpkg_installed\x64-windows\tools\castxml\bin\castxml.exe|--also|tbfixture_win.h|-I|" & root & "\tests\fixture-outside", "|")
+        Console.StartCapture
+        mCode = MainModule.Run(args)
+        mOutput = Console.StopCapture()
+        Return mRun
+    End Function
+
+    Private Function Source(ByVal moduleName As String) As String
+        Dim path As String = RunFolder() & "\out\Source\" & moduleName & ".twin"
+        If FileSys.KindOf(path) <> FileSys.KIND_FILE Then Return ""
+        Return FileSys.ReadTextUtf8(path)
+    End Function
+
+    Private Function Mapper(ByVal arch As String) As TypeMapper
+        Dim m As New CxModel
+        m.Load RunFolder() & "\out\Work\castxml_" & arch & ".xml", SelfTest.RepoRoot() & "\tests\fixture-c"
+        Dim t As New TypeMapper
+        t.Init m
+        Return t
+    End Function
+
+    Private Sub RunOk()
+        Dim folder As String = RunFolder()
+        SelfTest.AssertTrue "the run exits 0", mCode = 0, mOutput
+    End Sub
+
+    ' The text contains this exact line (or consecutive lines joined with vbCrLf).
+    Private Sub HasLine(ByVal text As String, ByVal what As String, ByVal lineText As String)
+        SelfTest.AssertTrue what, InStr(text, vbCrLf & lineText & vbCrLf) > 0, "missing line(s): [" & Replace(lineText, vbCrLf, " \n ") & "]"
+    End Sub
+
+    Private Function Occurrences(ByVal s As String, ByVal part As String) As Long
+        Return (Len(s) - Len(Replace(s, part, ""))) \ Len(part)
+    End Function
+
+    ' ---- tests -----------------------------------------------------------------------
+
+    Private Sub Kinds()
+        RunOk
+        Dim o As OutsideType, s As String
+        For Each o In Mapper("x64").OutsideTypes()
+            s &= o.Name & ":" & o.Kind & "|"
+        Next
+        SelfTest.AssertEq "kinds, in the order reached", s, "tagLOGFONTW:struct|HDC:handle|tagPOINT:struct|tagRECT:struct|HBRUSH:handle|FILE:opaque|" & _
+            "IStream:com|OUT_MODE:enum|OUT_RECP:handle|OUT_REC:struct|OUT_INNER:struct|OUT_OPAQUE:opaque|"
+    End Sub
+
+    Private Sub Mapping()
+        RunOk
+        Dim t As String = Source("tbfixture_win")
+        HasLine t, "T* to an outside struct: ByRef", "        ByRef lf As tagLOGFONTW _"
+        HasLine t, "a handle returned", "    Public DeclareWide PtrSafe Function tbw_screen_dc CDecl Lib ""tbfixture.dll"" () As HDC"
+        HasLine t, "a handle passed ByVal", "        ByVal dc As HDC _"
+        HasLine t, "an outside struct by value, both ways", "        ByVal a As tagPOINT, _" & vbCrLf & "        ByVal b As tagPOINT _" & vbCrLf & "    ) As tagPOINT"
+        HasLine t, "FILE* as the FILE alias", "        ByVal f As FILE _"
+        HasLine t, "a COM interface pointer (D-058)", "        ByVal s As LongPtr /* IStream */ _"
+        HasLine t, "an outside enum", "        ByVal mode As OUT_MODE _"
+        HasLine t, "a pointer typedef returned", "    Public DeclareWide PtrSafe Function tbw_rec_get CDecl Lib ""tbfixture.dll"" () As OUT_RECP"
+        HasLine t, "an incomplete outside struct", "        ByVal o As OUT_OPAQUE _"
+        HasLine t, "an outside struct as a field", "        bounds As tagRECT  ' C: RECT"
+        HasLine t, "a handle as a field", "        brush As HBRUSH  ' C: HBRUSH"
+    End Sub
+
+    Private Sub Placement()
+        RunOk
+        Dim windef As String = Source("windef")
+        SelfTest.AssertTrue "title without a machine path", Left$(windef, 50) = "' GENERATED by tbBlob from shared/windef.h -- do n", Left$(windef, 80)
+        Dim aliasAt As Long = InStr(windef, vbCrLf & "Public Alias HDC As LongPtr" & vbCrLf)
+        Dim moduleAt As Long = InStr(windef, vbCrLf & "Module windef" & vbCrLf)
+        SelfTest.AssertTrue "the handle alias at file scope, before the module", aliasAt > 0 And aliasAt < moduleAt, "alias " & aliasAt & ", module " & moduleAt
+        HasLine windef, "an outside struct in its header's module", "    Public Type tagPOINT"
+        HasLine Source("wingdi"), "tagLOGFONTW in wingdi", "    Public Type tagLOGFONTW"
+        HasLine Source("corecrt_wstdio"), "FILE in corecrt_wstdio", "Public Alias FILE As LongPtr"
+        Dim outlib As String = Source("outlib")
+        HasLine outlib, "the outside enum", "    Public Enum OUT_MODE"
+        HasLine outlib, "the transitively imported struct", "    Public Type OUT_INNER"
+        SelfTest.AssertTrue "an unreached struct is not imported", InStr(outlib, "OUT_UNUSED") = 0
+        Dim all As String, n As Variant
+        For Each n In Array("windef", "wingdi", "outlib", "corecrt_wstdio", "tbfixture", "tbfixture_win")
+            all &= Source(n)
+        Next
+        SelfTest.AssertEq "HDC declared once in the whole project (D-065)", Occurrences(all, "Public Alias HDC As "), 1
+        SelfTest.AssertTrue "DECLARE_HANDLE's struct is not imported", InStr(all, "Public Type HDC__") = 0
+        SelfTest.AssertTrue "no IStream Type or Vtbl", InStr(all, "Public Type IStream") = 0 And InStr(all, "IStreamVtbl") = 0
+    End Sub
+
+    Private Sub LayoutAndArch()
+        RunOk
+        Dim t As String = Source("tbfixture_LayoutCheck")
+        SelfTest.AssertTrue "tagLOGFONTW is layout-checked", InStr(t, "Chk ""tagLOGFONTW size"", LenB(v), E(92, 92)") > 0, "length " & Len(t)
+        SelfTest.AssertTrue "OUT_REC is layout-checked", InStr(t, """OUT_REC size""") > 0, "length " & Len(t)
+        Dim m64 As TypeMapper = Mapper("x64")
+        Dim m86 As TypeMapper = Mapper("x86")
+        SelfTest.AssertTrue "the x86 twin of an outside record is found", Not m86.FindRecord("tagLOGFONTW") Is Nothing
+        SelfTest.AssertEq "no disagreements", m64.Disagreements(m86).Count, 0
+    End Sub
+
+    Private Sub ReportSections()
+        RunOk
+        Dim r As String = FileSys.ReadTextUtf8(RunFolder() & "\out\report.md")
+        HasLine r, "a struct", "- tagLOGFONTW: imported struct (92 bytes on x64), module wingdi (um\wingdi.h)"
+        HasLine r, "a handle", "- HDC: handle (DECLARE_HANDLE), LongPtr alias, module windef (shared\windef.h)"
+        HasLine r, "FILE", "- FILE: standard pointer-only type (C11 7.21.3), LongPtr alias, module corecrt_wstdio (ucrt\corecrt_wstdio.h)"
+        HasLine r, "a pointer typedef", "- OUT_RECP: pointer typedef to OUT_REC (imported), LongPtr alias, module outlib (fixture-outside\outlib.h)"
+        HasLine r, "an opaque struct", "- OUT_OPAQUE: opaque (incomplete struct), LongPtr alias, module outlib (fixture-outside\outlib.h)"
+        SelfTest.AssertTrue "COM interfaces section with its user", InStr(r, vbCrLf & "## COM interfaces" & vbCrLf & "- IStream (um\objidlbase.h): written LongPtr /* IStream */") > 0 And _
+            InStr(r, "Used by: tbw_stream_ok" & vbCrLf) > 0, Mid$(r, InStr(r, "## COM"), 400)
+        ' the last test: remove the cached run
+        FileSys.RemovePath mRun
+        mRun = ""
+    End Sub
+End Module

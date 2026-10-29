@@ -21,7 +21,7 @@ $tool = "$root\tools\impexp\Build\tBImportExport_win64.exe"
 $new = if ($BindingsOnly) { $BindingsOnly } else { "$here\bindings.new" }
 if (Test-Path $new) { Remove-Item -Recurse -Force $new }
 # The DLL folders (D-053): each function binds to tbfixture.dll or tbfixture_ext.dll by their export tables.
-& $tbBlob "$root\tests\fixture-c" tbfixture.h "$root\tests\fixture-c\bin\win64" $new --castxml $castxml --x86-dll "$root\tests\fixture-c\bin\win32" --also tbfixture_sys.h --also tbfixture_ext.h
+& $tbBlob "$root\tests\fixture-c" tbfixture.h "$root\tests\fixture-c\bin\win64" $new --castxml $castxml --x86-dll "$root\tests\fixture-c\bin\win32" --also tbfixture_sys.h --also tbfixture_ext.h --also tbfixture_win.h -I "$root\tests\fixture-outside"
 if ($LASTEXITCODE -ne 0) { Write-Host "FAILED: tbBlob exit $LASTEXITCODE"; exit 1 }
 if ($BindingsOnly) { exit 0 }
 $changed = Sync-Bindings $new "$here\bindings"

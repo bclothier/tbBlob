@@ -39,6 +39,7 @@ Module SelfTest
             Case Tests_Doctor.MODULE_ID: Tests_Doctor.RunTest index
             Case Tests_Perf.MODULE_ID: Tests_Perf.RunTest index
             Case Tests_Dlls.MODULE_ID: Tests_Dlls.RunTest index
+            Case Tests_Outside.MODULE_ID: Tests_Outside.RunTest index
             Case Else: Err.Raise CHECK_FAILED, , "no test module " & moduleId
         End Select
     End Sub
@@ -56,6 +57,7 @@ Module SelfTest
         Tests_EndToEnd.Register
         Tests_Doctor.Register
         Tests_Dlls.Register
+        Tests_Outside.Register
         Tests_Perf.Register
     End Sub
 

@@ -1,0 +1,10 @@
+' A type declared outside the header folder that the library uses (D-054, D-058, D-065): imported as
+' a Type or Enum, written as a LongPtr alias, or (a COM interface) only named in a comment.
+Class OutsideType
+    Public Element As MSXML2.IXMLDOMElement   ' the Struct, Union, Enumeration or Typedef
+    Public Name As String           ' its tB name: struct tag, enum name, or the alias's typedef name
+    Public Kind As String           ' struct, enum, handle, opaque, com
+    Public HeaderPath As String     ' the header that declares it
+    Public Pointee As String        ' handle: the struct the pointer typedef points to
+    Public PointeeImported As Boolean   ' handle: that struct is imported too (complete, not DECLARE_HANDLE's)
+End Class

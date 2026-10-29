@@ -138,6 +138,8 @@ loading them, then one section per kind of finding. Each entry gives its reason:
 | Section | What it lists |
 |---|---|
 | Headers skipped | `--also` headers CastXML could not read (a C++-only header, an `#error`, a missing dependency), each with the CastXML pass that failed and its error lines. Their functions and types are not generated; everything else is. See [A header CastXML cannot read](#a-header-castxml-cannot-read) |
+| Outside types | Types from headers outside the header folder (Windows SDK, C runtime, other libraries) that the library's declarations use, each with its kind and module. See [Types from other headers](#types-from-other-headers) |
+| COM interfaces | COM interface pointers, written `LongPtr /* IName */`, and the functions and fields that use each |
 | Renamed | Names changed to avoid a collision. twinBASIC is case-insensitive, so `TBF_OPEN` and `tbf_open` collide. Each entry names the other item |
 | Type aliases | C typedefs and type-naming macros emitted as `Public Alias` |
 | Skipped macros | Macros that can't be twinBASIC constants (function-like, initializers, casts, cycles), each with the reason |
@@ -209,6 +211,26 @@ loading them, then one section per kind of finding. Each entry gives its reason:
 
 Your program needs only the library's DLL at run time. tbBlob, CastXML and Visual Studio are needed
 only to generate.
+
+## Types from other headers
+
+A library's functions often use types it doesn't declare itself: `HDC`, `RECT` and `LOGFONTW` from
+the Windows SDK, `FILE` from the C runtime, `FT_Face` from FreeType. tbBlob imports exactly the ones
+the library uses, and everything those need, into one module per header, named after the header
+(`windef`, `wingdi`, `corecrt_wstdio`, `freetype`). How each is written:
+
+| C | tB | Why |
+|---|---|---|
+| a struct, used by value, as a field, or through `T*` | the real `Type` (`ByRef As tagLOGFONTW` for `T*`), layout-checked like the library's own | a copy needs the real layout |
+| an enum | the `Enum` with its values | |
+| a handle: `DECLARE_HANDLE` (`HDC`, `HWND`, `HBRUSH`) or a typedef to a pointer to a struct (`FT_Face`) | `Public Alias HDC As LongPtr`, passed `ByVal` | the value is the pointer; a pointer typedef's struct is still imported for reading fields |
+| an incomplete struct, or `FILE` | `Public Alias X As LongPtr`, `X*` passed `ByVal As X` | only ever a pointer (C11 7.21.3 for `FILE`) |
+| a COM interface pointer (`IStream*`) | `ByVal As LongPtr /* IStream */` | pass `ObjPtr(obj)` of a tB interface reference; write the `Interface` yourself to call its methods |
+
+Every alias is one name for the whole project, declared once at file scope of its header's module
+(twinBASIC aliases can't be module-qualified). Names the library and another header both use are
+renamed and reported like any other collision. Give `-I` for another library's include folder, as
+for any header the library includes.
 
 ## A header CastXML cannot read
 

@@ -8,7 +8,8 @@ Module Harness
     Private Declare PtrSafe Function CoInitializeEx Lib "ole32" (ByVal pvReserved As LongPtr, ByVal dwCoInit As Long) As Long
     Private Declare PtrSafe Sub CoUninitialize Lib "ole32" ()
     Private Const COINIT_MULTITHREADED As Long = 0
-    Private Const GROUPS As Long = 20
+    Private Declare PtrSafe Function CreateStreamOnHGlobal Lib "ole32" (ByVal hGlobal As LongPtr, ByVal fDeleteOnRelease As Long, ByRef ppstm As LongPtr) As Long
+    Private Const GROUPS As Long = 21
 
     Private mVisits As Long
     Private mNotified As Long
@@ -89,6 +90,7 @@ Module Harness
             Case 18: LibraryThreads
             Case 19: LibraryMemory
             Case 20: SecondDll
+            Case 21: OutsideTypes
         End Select
         Exit Sub
     failed:
@@ -548,6 +550,43 @@ Module Harness
     ' ---- 17. a header the entry header does not include, generated through --also (D-033) ----
     Private Sub ExtraHeader()
         Results.CheckEq "17.sys_answer (declared only in tbfixture_sys.h)", tbf_sys_answer(), 42
+    End Sub
+
+    ' ---- 21. outside types (D-054, D-058, D-065): Windows SDK structs and handles, FILE, a COM
+    ' interface and outlib.h's types, all through tbfixture_win.h's bindings -------------------
+    Private Sub OutsideTypes()
+        Dim lf As tagLOGFONTW
+        tbw_make_font lf
+        Results.CheckEq "21.make_font fills an outside struct (ByRef tagLOGFONTW)", lf.lfHeight, -13
+        Results.Check "21.its face name", ChrW$(lf.lfFaceName(0)) & ChrW$(lf.lfFaceName(1)) & ChrW$(lf.lfFaceName(4)) & lf.lfFaceName(5) = "Arl0"
+        Results.CheckEq "21.font_height reads it back", tbw_font_height(lf), -13
+        Dim dc As HDC = tbw_screen_dc()
+        Results.Check "21.screen_dc returns a handle alias (HDC)", dc <> 0
+        Results.Check "21.dc_dpi through it", tbw_dc_dpi(dc) > 0, CStr(tbw_dc_dpi(dc))
+        Results.CheckEq "21.release_dc", tbw_release_dc(dc), 1
+        Dim a As tagPOINT, b As tagPOINT
+        a.x = 1: a.y = 2: b.x = 10: b.y = 20
+        Dim c As tagPOINT = tbw_point_add(a, b)
+        Results.Check "21.point_add: an outside struct by value, both ways", c.x = 11 And c.y = 22, c.x & "," & c.y
+        Dim sh As TBW_SHAPE
+        tbw_make_shape sh
+        Results.CheckEq "21.check_shape (tagRECT and HBRUSH fields)", tbw_check_shape(sh), 0
+        Results.Check "21.shape fields read in tB", sh.bounds.right = 30 And sh.bounds.bottom = 40 And sh.brush = 0 And sh.color = &HFF8000
+        Results.CheckEq "21.file_tell(NULL) through the FILE alias", tbw_file_tell(0), -1
+        Dim stm As LongPtr
+        Results.CheckEq "21.CreateStreamOnHGlobal", CreateStreamOnHGlobal(0, 1, stm), 0
+        Results.CheckEq "21.stream_ok with a real IStream (LongPtr /* IStream */)", tbw_stream_ok(stm), 1
+        Results.CheckEq "21.stream_ok(NULL)", tbw_stream_ok(0), 0
+        Results.CheckEq "21.mode_value (outside enum)", tbw_mode_value(OUT_MODE_SAFE), 2
+        Dim rp As OUT_RECP = tbw_rec_get()
+        Dim rec As OUT_REC
+        RtlMoveMemory VarPtr(rec), rp, LenB(rec)
+        Results.Check "21.rec_get: a pointer typedef read into the imported OUT_REC (with OUT_INNER)", rec.id = 7 And rec.inner.tag = 3 And rec.inner.weight = 2.5, _
+            rec.id & ", " & rec.inner.tag & ", " & rec.inner.weight
+        Dim op As OUT_OPAQUE = tbw_opaque_new(42)
+        Results.Check "21.opaque_new returns an opaque alias", op <> 0
+        Results.CheckEq "21.opaque_value", tbw_opaque_value(op), 42
+        tbw_opaque_free op
     End Sub
 
     ' ---- 20. a second DLL of the library (D-053): tbfixture_ext.h binds to tbfixture_ext.dll ----

@@ -1,7 +1,8 @@
 ' Maps one CastXML model's types to tB (PRD req. 19-25): fields, parameters, returns, unions,
 ' bitfields, packing and calling conventions. One TypeMapper per architecture; Disagreements
 ' compares the x86 and x64 mappers (PRD section 7.8). Rules: D-001 (fields), D-003 (pointers),
-' D-005 (scalars), D-006 (va_list), D-018 (unions).
+' D-005 (scalars), D-006 (va_list), D-018 (unions); types declared outside the header folder:
+' D-054, D-058, D-065 (OutsideTypes).
 Class TypeMapper
     Public Model As CxModel
     Public SynthDelegates As New Collection
@@ -11,11 +12,15 @@ Class TypeMapper
 
     Private mRecordIndex As Collection      ' record name -> first record of that name (D-038; keyed, D-040)
     Private mFunctionIndex As Collection    ' function name -> first function of that name
+    Private mOutside As Collection          ' OutsideType, in the order reached (OutsideTypes)
+    Private mOutsideSeen As Collection      ' element id -> True: already walked
+    Private mOutsideNames As Collection     ' tB name -> True: each outside name once (D-065)
 
     Public Sub Init(m As CxModel)
         Set Model = m
         Set mRecordIndex = Nothing
         Set mFunctionIndex = Nothing
+        Set mOutside = Nothing
     End Sub
 
     ' ---- lookups ---------------------------------------------------------------------
@@ -29,6 +34,11 @@ Class TypeMapper
             For Each r In Model.Records()
                 n = Model.NameOf(r)
                 If Not mRecordIndex.Exists(n) Then mRecordIndex.Add r, n
+            Next
+            ' imported outside structs too (D-054), so the x86 twin of one is found by name
+            Dim o As OutsideType
+            For Each o In OutsideTypes()
+                If o.Kind = "struct" And Not mRecordIndex.Exists(o.Name) Then mRecordIndex.Add o.Element, o.Name
             Next
         End If
         If Not mRecordIndex.Exists(name) Then Return Nothing
@@ -87,6 +97,156 @@ Class TypeMapper
         Return c.TbType
     End Function
 
+    ' ---- outside types (D-054, D-058, D-065) ------------------------------------------------
+
+    ' Every type declared outside the header folder that the library reaches -- through its
+    ' functions, record fields and typedefs, and then through the fields of each imported struct --
+    ' each once, in the order reached. Each outside name appears once (D-065: one alias per name).
+    Public Function OutsideTypes() As Collection
+        If Not mOutside Is Nothing Then Return mOutside
+        Set mOutside = New Collection
+        Set mOutsideSeen = New Collection
+        mOutsideSeen.KeyCompareMode = vbBinaryCompare
+        Set mOutsideNames = New Collection
+        mOutsideNames.KeyCompareMode = vbBinaryCompare
+        Dim el As MSXML2.IXMLDOMElement, child As MSXML2.IXMLDOMElement
+        For Each el In Model.Functions()
+            ReachType Model.Attr(el, "returns")
+            For Each child In el.childNodes
+                If child.nodeName = "Argument" Then ReachType Model.Attr(child, "type")
+            Next
+        Next
+        For Each el In Model.Records()
+            ReachFields el
+        Next
+        For Each el In Model.Typedefs()
+            ReachType Model.Attr(el, "type")
+        Next
+        Return mOutside
+    End Function
+
+    Private Sub ReachFields(ByVal record As MSXML2.IXMLDOMElement)
+        Dim id As Variant, f As MSXML2.IXMLDOMElement
+        For Each id In Split(Trim$(Model.Attr(record, "members")), " ")
+            Set f = Model.ById(id)
+            If Not f Is Nothing Then
+                If Model.Tag(f) = "Field" Then ReachType Model.Attr(f, "type")
+            End If
+        Next
+    End Sub
+
+    Private Sub ReachType(ByVal typeId As String)
+        Dim e As MSXML2.IXMLDOMElement = Model.ById(typeId)
+        If e Is Nothing Then Exit Sub
+        Dim id As String = Model.Attr(e, "id")
+        If mOutsideSeen.Exists(id) Then Exit Sub
+        mOutsideSeen.Add True, id
+        Dim child As MSXML2.IXMLDOMElement, t As MSXML2.IXMLDOMElement, s As MSXML2.IXMLDOMElement
+        Select Case Model.Tag(e)
+            Case "CvQualifiedType", "ElaboratedType", "PointerType", "ArrayType"
+                ReachType Model.Attr(e, "type")
+            Case "FunctionType"
+                ReachType Model.Attr(e, "returns")
+                For Each child In e.childNodes
+                    If child.nodeName = "Argument" Then ReachType Model.Attr(child, "type")
+                Next
+            Case "Typedef"
+                If Model.InLibrary(e) Then
+                    ReachType Model.Attr(e, "type")
+                ElseIf IsStdPointerType(Model.Attr(e, "name")) Then
+                    AddOutside e, Model.Attr(e, "name"), "opaque"
+                Else
+                    Set s = HandlePointee(e)
+                    If Not s Is Nothing Then
+                        ' the struct is imported for reading fields, unless it is incomplete or
+                        ' DECLARE_HANDLE's placeholder (struct X__ { int unused; })
+                        Dim o As OutsideType = AddOutside(e, Model.Attr(e, "name"), "handle")
+                        If Not o Is Nothing Then
+                            o.Pointee = Model.NameOf(s)
+                            o.PointeeImported = Not Model.IsOpaque(s) And Not IsHandleShape(s)
+                            If o.PointeeImported Then ReachType Model.Attr(s, "id")
+                        End If
+                    Else
+                        Set t = Model.Strip(Model.Attr(e, "type"))
+                        If (Model.Tag(t) = "Struct" Or Model.Tag(t) = "Union") And Model.IsOpaque(t) Then
+                            ' typedef struct X Y: the alias is named after the typedef, as Classify writes it
+                            AddOutside e, Model.Attr(e, "name"), "opaque"
+                        Else
+                            ReachType Model.Attr(e, "type")
+                        End If
+                    End If
+                End If
+            Case "Struct", "Union"
+                If Model.InLibrary(e) Then
+                    ReachFields e
+                ElseIf IsComInterface(e) Then
+                    AddOutside e, Model.NameOf(e), "com"
+                ElseIf Model.IsOpaque(e) Then
+                    If Len(Model.NameOf(e)) > 0 Then AddOutside e, Model.NameOf(e), "opaque"
+                Else
+                    AddOutside e, Model.NameOf(e), "struct"
+                    ReachFields e
+                End If
+            Case "Enumeration"
+                If Not Model.InLibrary(e) Then AddOutside e, Model.NameOf(e), "enum"
+        End Select
+    End Sub
+
+    ' Records an outside type; Nothing (and nothing recorded) when its name is already taken.
+    Private Function AddOutside(ByVal e As MSXML2.IXMLDOMElement, ByVal name As String, ByVal kind As String) As OutsideType
+        If Len(name) = 0 Or mOutsideNames.Exists(name) Then Return Nothing
+        mOutsideNames.Add True, name
+        Dim o As New OutsideType
+        Set o.Element = e
+        o.Name = name
+        o.Kind = kind
+        o.HeaderPath = Model.FileOf(e)
+        mOutside.Add o
+        Return o
+    End Function
+
+    ' C types the C standard makes pointer-only (D-054): FILE, C11 7.21.3 (a copy of a FILE need not
+    ' work in place of the original). The list grows only on the same kind of evidence.
+    Private Function IsStdPointerType(ByVal name As String) As Boolean
+        Return name = "FILE"
+    End Function
+
+    ' A COM interface in MIDL's C shape (D-058): a struct whose only member is lpVtbl, a pointer to
+    ' a struct named <name>Vtbl.
+    Public Function IsComInterface(ByVal s As MSXML2.IXMLDOMElement) As Boolean
+        Dim members As String = Trim$(Model.Attr(s, "members"))
+        If Len(members) = 0 Or InStr(members, " ") > 0 Then Return False
+        Dim f As MSXML2.IXMLDOMElement = Model.ById(members)
+        If f Is Nothing Then Return False
+        If Model.Attr(f, "name") <> "lpVtbl" Then Return False
+        Dim p As MSXML2.IXMLDOMElement = Model.Strip(Model.Attr(f, "type"))
+        If Model.Tag(p) <> "PointerType" Then Return False
+        Return Model.NameOf(Model.Strip(Model.Attr(p, "type"))) = Model.NameOf(s) & "Vtbl"
+    End Function
+
+    ' For an outside typedef of a pointer to a struct or union (HDC -> HDC__*, OUT_RECP -> OUT_REC*),
+    ' that struct; Nothing otherwise, and for a COM interface pointer.
+    Private Function HandlePointee(ByVal td As MSXML2.IXMLDOMElement) As MSXML2.IXMLDOMElement
+        If Model.InLibrary(td) Then Return Nothing
+        Dim t As MSXML2.IXMLDOMElement = Model.Strip(Model.Attr(td, "type"))
+        If Model.Tag(t) <> "PointerType" Then Return Nothing
+        Dim s As MSXML2.IXMLDOMElement = Model.Strip(Model.Attr(t, "type"))
+        Do While Model.Tag(s) = "Typedef"
+            Set s = Model.Strip(Model.Attr(s, "type"))
+        Loop
+        If Model.Tag(s) <> "Struct" And Model.Tag(s) <> "Union" Then Return Nothing
+        If IsComInterface(s) Then Return Nothing
+        Return s
+    End Function
+
+    ' DECLARE_HANDLE's placeholder struct: struct X__ { int unused; }.
+    Private Function IsHandleShape(ByVal s As MSXML2.IXMLDOMElement) As Boolean
+        If Right$(Model.NameOf(s), 2) <> "__" Then Return False
+        Dim members As String = Trim$(Model.Attr(s, "members"))
+        If Len(members) = 0 Or InStr(members, " ") > 0 Then Return False
+        Return Model.Attr(Model.ById(members), "name") = "unused"
+    End Function
+
     ' ---- classification ----------------------------------------------------------------
 
     Private Function IsPointerSizedTypedef(ByVal name As String) As Boolean
@@ -130,6 +290,19 @@ Class TypeMapper
                 Dim t As MSXML2.IXMLDOMElement = Model.Strip(Model.Attr(e, "type"))
                 ' a library typedef that renames a struct/enum/scalar is a type alias (D-025)
                 Dim isAlias As Boolean = Model.InLibrary(e)
+                ' D-054: an outside pointer-only type or pointer typedef is a LongPtr alias of that name
+                If Not isAlias Then
+                    If IsStdPointerType(n) Then
+                        r.Kind = "opaque"
+                        r.TbType = n
+                        Return r
+                    End If
+                    If Not HandlePointee(e) Is Nothing Then
+                        r.Kind = "handle"
+                        r.TbType = n
+                        Return r
+                    End If
+                End If
                 Select Case Model.Tag(t)
                     Case "Struct", "Union"
                         Set r = RecordOrOpaque(t, n)
@@ -202,6 +375,12 @@ Class TypeMapper
     Private Function RecordOrOpaque(ByVal s As MSXML2.IXMLDOMElement, ByVal typedefName As String) As TypeInfo
         Dim r As New TypeInfo
         Dim name As String = Model.NameOf(s)
+        If Not Model.InLibrary(s) And IsComInterface(s) Then
+            ' D-058: only ever reached through a pointer, written LongPtr /* name */
+            r.Kind = "com"
+            r.TbType = name
+            Return r
+        End If
         If Model.IsOpaque(s) Then
             r.Kind = "opaque"
             r.TbType = IIf(Len(typedefName) > 0, typedefName, name)
@@ -248,6 +427,7 @@ Class TypeMapper
         Select Case c.Kind
             Case "scalar": Return TypeText(c)
             Case "enum", "record", "delegate": Return TypeText(c)
+            Case "handle": Return c.TbType
             Case "pointer"
                 Dim p As TypeInfo = Classify(c.RefId)
                 If p.Kind = "fntype" Then
@@ -255,6 +435,7 @@ Class TypeMapper
                     Return SynthDelegateFor(p.FnId, synthName, owner, source)
                 End If
                 If p.Kind = "opaque" Then Return p.TbType
+                If p.Kind = "com" Then Return ComText(p.TbType)
                 Return "LongPtr"
             Case "array": Return FieldType(c.RefId, synthName, owner, source)
         End Select
@@ -458,6 +639,8 @@ NextMember:
                 p.TypeText = TypeText(c)
             Case "enum", "delegate"
                 p.TypeText = TypeText(c)
+            Case "handle"
+                p.TypeText = c.TbType
             Case "record"
                 p.TypeText = TypeText(c)
                 p.IsStructByValue = True
@@ -470,6 +653,11 @@ NextMember:
                         p.Passing = "ByRef"
                         p.TypeText = TypeText(t)
                     Case "opaque"
+                        p.TypeText = t.TbType
+                    Case "com"
+                        p.TypeText = ComText(t.TbType)
+                    Case "handle"
+                        p.Passing = "ByRef"
                         p.TypeText = t.TbType
                     Case "fntype"
                         If Len(t.Name) > 0 Then p.TypeText = t.Name Else p.TypeText = SynthDelegateFor(t.FnId, synthName, owner, Nothing, True)
@@ -486,7 +674,13 @@ NextMember:
                     Case "pointer"
                         Dim q As TypeInfo = Classify(t.RefId)
                         p.Passing = "ByRef"
-                        p.TypeText = IIf(q.Kind = "opaque", q.TbType, "LongPtr")
+                        If q.Kind = "opaque" Then
+                            p.TypeText = q.TbType
+                        ElseIf q.Kind = "com" Then
+                            p.TypeText = ComText(q.TbType)
+                        Else
+                            p.TypeText = "LongPtr"
+                        End If
                     Case Else
                         p.TypeText = "LongPtr"
                 End Select
@@ -502,12 +696,19 @@ NextMember:
             Case "void": Return ""
             Case "scalar": Return TypeText(c)
             Case "enum", "delegate", "record": Return TypeText(c)
+            Case "handle": Return c.TbType
             Case "pointer"
                 Dim p As TypeInfo = Classify(c.RefId)
                 If p.Kind = "opaque" Then Return p.TbType
+                If p.Kind = "com" Then Return ComText(p.TbType)
                 Return "LongPtr"
         End Select
         Return "LongPtr"
+    End Function
+
+    ' A COM interface pointer's tB type: LongPtr, with the interface named for search (D-058).
+    Private Function ComText(ByVal interfaceName As String) As String
+        Return "LongPtr /* " & interfaceName & " */"
     End Function
 
     ' True when the function returns a struct or union by value.
@@ -639,6 +840,20 @@ NextMember:
             Else
                 CompareFields d, Model.NameOf(r), FieldsOf(r), other.FieldsOf(o)
                 If Packing(r) <> other.Packing(o) Then d.Add "record " & Model.NameOf(r) & ": packing " & Packing(r) & " vs " & other.Packing(o)
+            End If
+        Next
+        ' imported outside structs are generated too, so they must agree as well (D-054)
+        Dim ot As OutsideType
+        For Each ot In OutsideTypes()
+            If ot.Kind = "struct" Then
+                CurrentItem = "outside record " & ot.Name & " (" & ot.HeaderPath & ")"
+                Set o = other.FindRecord(ot.Name)
+                If o Is Nothing Then
+                    d.Add "record " & ot.Name & " exists in only one architecture"
+                Else
+                    CompareFields d, ot.Name, FieldsOf(ot.Element), other.FieldsOf(o)
+                    If Packing(ot.Element) <> other.Packing(o) Then d.Add "record " & ot.Name & ": packing " & Packing(ot.Element) & " vs " & other.Packing(o)
+                End If
             End If
         Next
         For Each f In Model.Functions()

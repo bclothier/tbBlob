@@ -82,6 +82,7 @@
 | D-063 | 26a.0 | Task-only | D-057 as built: any untraceable error stays fatal; clang's omitted include stacks; one failed-output file per pass | Active |
 | D-064 | Spike | Finding | Module-qualified Types work everywhere; a Public Alias is project-wide and cannot be module-qualified | Active |
 | D-065 | 27.0, 28.0 | Plan | Outside types revised: aliases are project-wide names; same-name Types are always qualified | Active |
+| D-066 | 27.0 | Task-only | Outside types as built: one walk, alias kinds from typedefs, integration tests instead of snapshots | Active |
 
 ---
 ### D-001 — tB UDT layout equals C natural alignment for all 85 libgit2 structs, both archs (Task: Spike)
@@ -886,3 +887,19 @@
   - 27.0 and 28.0 get their sub-tasks with these rules.
 - Rationale: generated code must compile; the spike shows which spellings tB accepts, so tbBlob uses those and never emits the two that fail (a module-qualified alias, an ambiguous unqualified Type).
 - Alternatives considered: emitting outside aliases as one-field `Type`s so they can be module-qualified (changes how handles pass: a `Type` goes `ByRef`, a handle must go by value); qualifying aliases with the project name (the project name is the user's `--name`, and unqualified aliases are already unique once each is declared once).
+
+---
+### D-066 — Outside types as built: one walk, alias kinds from typedefs, integration tests instead of snapshots (Task 27.0)
+- Date: 2026-10-28
+- Scope: Task-only
+- Status: Active
+- Context: implementing D-054/D-058 under D-065's rules.
+- Decision:
+  - `TypeMapper.OutsideTypes()` walks the library's functions, record fields and typedefs once (then each imported struct's fields), each element once, each outside name once. The name table, the emitter, `FindRecord` (x86 twins) and `Disagreements` all use it; each architecture's mapper walks its own model.
+  - Alias kinds are decided on the outside **typedef**: a typedef to a pointer to a struct/union is a `handle` (`DECLARE_HANDLE` and pointer typedefs alike; the struct is imported when complete and not `struct X__ { int unused; }`); `FILE` (standard list) is `opaque`, like an incomplete struct; `Classify` returns these kinds, so `MapParam`/`ReturnOf`/`FieldType` need only small additions. A COM interface is decided on the struct (`lpVtbl` only, pointing to `<name>Vtbl`).
+  - A `Type` name in two generated modules cannot come from one translation unit (C struct tags are unique), so no automatic qualification is written; D-065's rule stays for `--qualify-outside` (28.0).
+  - An outside module's header comment uses the header's last two path parts (`shared/windef.h`), so generated files carry no machine path.
+  - The unit tests 27.2 asked for are integration tests (`Tests_Outside`, one cached CastXML run): with `<windows.h>` and `<objidl.h>` the XML is ~8 MB per architecture, too big to commit as snapshots.
+  - Observed while checking: `tblaunch compile` on a bare source folder reports `RtlMoveMemory` unrecognised inside union accessors' `Type`-level `Private Declare`, for the unchanged pre-26.0 snapshot too; a real project build (the harness) compiles it. Not a tbBlob problem.
+- Rationale: one walk keeps emission, names and checks consistent; the typedef is where C says "this is a pointer", so the alias decision lives there.
+- Alternatives considered: committing the 16 MB of SDK snapshots; deciding handles by struct name patterns (D-054 rejected guessing).

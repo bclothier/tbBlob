@@ -28,7 +28,8 @@ foreach ($a in $archs) {
     $vc = "$vcvarsDir\$($a.vcvars)"
     # /wd4121 /wd4324: TBF_PACKED2 and TBF_ALIGNED are deliberately packing- and alignment-sensitive.
     $cl = "cl /nologo /W4 /WX /wd4121 /wd4324 /std:c11 /utf-8"
-    $buildDll = "$cl /LD `"$here\tbfixture.c`" /Fo`"$obj\\`" /Fe`"$bin\tbfixture.dll`" /link /DEF:`"$here\tbfixture.def`""
+    # tbfixture_win.c: functions using outside types (D-054): the Windows SDK and ..\fixture-outside\outlib.h
+    $buildDll = "$cl /I`"$here\..\fixture-outside`" /LD `"$here\tbfixture.c`" `"$here\tbfixture_win.c`" /Fo`"$obj\\`" /Fe`"$bin\tbfixture.dll`" /link /DEF:`"$here\tbfixture.def`" user32.lib gdi32.lib"
     $buildTest = "$cl `"$here\test_tbfixture.c`" `"$bin\tbfixture.lib`" /Fo`"$obj\\`" /Fe`"$bin\test_tbfixture.exe`""
     # A second DLL of the same library, using tbfixture.h's types (D-053).
     $buildExt = "$cl /LD `"$here\tbfixture_ext.c`" /Fo`"$obj\\`" /Fe`"$bin\tbfixture_ext.dll`""
@@ -55,7 +56,7 @@ foreach ($a in $archs) {
     Get-Content "$bin\exports.txt" | ForEach-Object {
         if ($_ -match '^\s+\d+\s+[0-9A-F]+\s+[0-9A-F]{8}\s+(\S+)') { $exported[$Matches[1]] = $true }
     }
-    $header = (Get-Content "$here\tbfixture.h" -Raw) + (Get-Content "$here\tbfixture_sys.h" -Raw)
+    $header = (Get-Content "$here\tbfixture.h" -Raw) + (Get-Content "$here\tbfixture_sys.h" -Raw) + (Get-Content "$here\tbfixture_win.h" -Raw)
     $declared = [regex]::Matches($header, '(?m)^TBF_(?:DEF_)?API\s+[^;{]*?\b(\w+)\s*\(') | ForEach-Object { $_.Groups[1].Value }
     $missing = @()
     # tbf_not_exported is declared but deliberately not defined: it must NOT be exported (D-031).

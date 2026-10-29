@@ -385,10 +385,10 @@ Module Tests_Emitter
         SelfTest.AssertTrue "x86 .def stdcall undecorated", x86.Exists("tbf_std_sub")
         SelfTest.AssertTrue "x86 no plain tbf_std_add", Not x86.Exists("tbf_std_add")
         SelfTest.AssertTrue "x86 cdecl", x86.Exists("tbf_ret_int")
-        SelfTest.AssertEq "x86 count (89 exported functions)", x86.Count, 89
+        SelfTest.AssertEq "x86 count (104 exported functions, 15 of them tbfixture_win.h's)", x86.Count, 104
         Dim x64 As Collection = PeExports.ExportNames(bin & "\win64\tbfixture.dll")
         SelfTest.AssertTrue "x64 plain stdcall", x64.Exists("tbf_std_add")
-        SelfTest.AssertEq "x64 count", x64.Count, 89
+        SelfTest.AssertEq "x64 count", x64.Count, 104
         SelfTest.AssertTrue "declared but undefined function not exported (D-031)", Not x86.Exists("tbf_not_exported") And Not x64.Exists("tbf_not_exported")
         SelfTest.AssertTrue "case-sensitive", Not x64.Exists("TBF_STD_ADD")
     End Sub

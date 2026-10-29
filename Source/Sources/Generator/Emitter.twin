@@ -81,7 +81,11 @@ Class Emitter
             mBodies.Add New Collection, name
             mScopes.Add New Collection, name
             Dim rel As String = Replace(headerPath, "/", "\")
-            If LCase$(Left$(rel, Len(mHeaderFolder) + 1)) = LCase$(mHeaderFolder & "\") Then rel = Mid$(rel, Len(mHeaderFolder) + 2)
+            If LCase$(Left$(rel, Len(mHeaderFolder) + 1)) = LCase$(mHeaderFolder & "\") Then
+                rel = Mid$(rel, Len(mHeaderFolder) + 2)
+            Else
+                rel = ShortHeader(rel)      ' an outside header (D-054): no machine-specific path
+            End If
             mTitles.Add Replace(rel, "\", "/"), name
         End If
         Return name
@@ -202,7 +206,7 @@ Class Emitter
         Set mLayoutCalls = New Collection
         Set mTbLayout = New Collection
         Set mTbLayoutCases = New Collection
-        mSections = Array("Headers skipped", "Renamed", "Type aliases", "Skipped macros", "Parameter names lost", "Structs passed or returned by value", _
+        mSections = Array("Headers skipped", "Outside types", "COM interfaces", "Renamed", "Type aliases", "Skipped macros", "Parameter names lost", "Structs passed or returned by value", _
             "Variadic functions", "stdcall functions", "Declared but not exported", "Exported but not declared", "Architecture-dependent constants", "Packing", "Unions", "Bitfields", "Mapping notes", "x86/x64 disagreements")
         Dim s As Variant
         For Each s In mSections
@@ -225,6 +229,7 @@ Class Emitter
         EmitTypeAliases
         EmitConstants
         EmitEnums
+        EmitOutside
         EmitDelegates
         Dim r As MSXML2.IXMLDOMElement
         For Each r In mM64.Records()
@@ -258,6 +263,7 @@ Class Emitter
         For Each line In mMap64.Notes
             Rep "Mapping notes", line
         Next
+        ReportComInterfaces
         For Each line In mMap64.Disagreements(mMap86)
             Rep "x86/x64 disagreements", line
         Next
@@ -396,24 +402,115 @@ Class Emitter
     End Sub
 
     Private Sub EmitEnums()
-        Dim e As MSXML2.IXMLDOMElement, child As MSXML2.IXMLDOMElement, m As String, comment As String
+        Dim e As MSXML2.IXMLDOMElement
         For Each e In mM64.Enumerations()
             SetItem "enum", mM64.NameOf(e), e
-            m = ModuleFor(mM64.FileOf(e))
-            AddDoc m, e, ""
-            Add m, "' C: enum " & mM64.NameOf(e)
-            Add m, "Public Enum " & mNames.TbName(mM64.NameOf(e), "type")
-            For Each child In e.childNodes
-                If child.nodeName = "EnumValue" Then
-                    comment = DocComments.EnumValueComment(mM64, e, mM64.Attr(child, "name"))
-                    Add m, "    " & mNames.TbName(mM64.Attr(child, "name"), "enumvalue") & " = " & IntLiteral(mM64.Attr(child, "init")) & _
-                        If(Len(comment) > 0, "  ' " & DocComments.SafeCommentLine(comment), "")
-                    Tally "enum values"
-                End If
-            Next
-            Add m, "End Enum"
-            Add m, ""
-            Tally "enums"
+            EmitEnum e
+        Next
+    End Sub
+
+    Private Sub EmitEnum(ByVal e As MSXML2.IXMLDOMElement)
+        Dim child As MSXML2.IXMLDOMElement, comment As String
+        Dim m As String = ModuleFor(mM64.FileOf(e))
+        AddDoc m, e, ""
+        Add m, "' C: enum " & mM64.NameOf(e)
+        Add m, "Public Enum " & mNames.TbName(mM64.NameOf(e), "type")
+        For Each child In e.childNodes
+            If child.nodeName = "EnumValue" Then
+                comment = DocComments.EnumValueComment(mM64, e, mM64.Attr(child, "name"))
+                Add m, "    " & mNames.TbName(mM64.Attr(child, "name"), "enumvalue") & " = " & IntLiteral(mM64.Attr(child, "init")) & _
+                    If(Len(comment) > 0, "  ' " & DocComments.SafeCommentLine(comment), "")
+                Tally "enum values"
+            End If
+        Next
+        Add m, "End Enum"
+        Add m, ""
+        Tally "enums"
+    End Sub
+
+    ' Types declared outside the header folder that the library uses (D-054, D-058, D-065): Types
+    ' and Enums in their header's module, aliases at its file scope (each name once), COM
+    ' interfaces only reported.
+    Private Sub EmitOutside()
+        Dim o As OutsideType, m As String, what As String
+        For Each o In mMap64.OutsideTypes()
+            SetItem "outside type", o.Name, o.Element
+            m = ""
+            Select Case o.Kind
+                Case "enum"
+                    EmitEnum o.Element
+                    m = ModuleFor(o.HeaderPath)
+                    what = "imported enum"
+                Case "struct"
+                    EmitType o.Element
+                    m = ModuleFor(o.HeaderPath)
+                    what = "imported struct (" & mM64.SizeBytes(o.Element) & " bytes on x64)"
+                Case "handle", "opaque"
+                    m = ModuleFor(o.HeaderPath)
+                    mScopes(m).Add "' C: " & DocComments.SafeCommentLine(OutsideCText(o))
+                    mScopes(m).Add "Public Alias " & mNames.TbName(o.Name, "type") & " As LongPtr"
+                    If o.Kind = "handle" Then
+                        If o.PointeeImported Then
+                            what = "pointer typedef to " & o.Pointee & " (imported), LongPtr alias"
+                        ElseIf Right$(o.Pointee, 2) = "__" Then
+                            what = "handle (DECLARE_HANDLE), LongPtr alias"
+                        Else
+                            what = "pointer typedef to " & o.Pointee & " (incomplete), LongPtr alias"
+                        End If
+                    ElseIf mM64.Tag(o.Element) = "Typedef" And mM64.Tag(mM64.Strip(mM64.Attr(o.Element, "type"))) <> "Struct" Then
+                        what = "opaque alias"
+                    ElseIf mM64.Tag(o.Element) = "Typedef" And Not mM64.IsOpaque(mM64.Strip(mM64.Attr(o.Element, "type"))) Then
+                        what = "standard pointer-only type (C11 7.21.3), LongPtr alias"
+                    Else
+                        what = "opaque (incomplete struct), LongPtr alias"
+                    End If
+                    Tally "outside aliases"
+                Case "com"
+                    what = "COM interface, written LongPtr /* " & o.Name & " */, not imported (D-058)"
+            End Select
+            Rep "Outside types", o.Name & ": " & what & If(Len(m) > 0, ", module " & m, "") & " (" & ShortHeader(o.HeaderPath) & ")"
+            Tally "outside types"
+        Next
+    End Sub
+
+    ' The C declaration of an outside alias, for its comment.
+    Private Function OutsideCText(o As OutsideType) As String
+        If mM64.Tag(o.Element) = "Typedef" Then Return "typedef " & mMap64.CTypeText(mM64.Attr(o.Element, "type")) & " " & o.Name
+        Return "struct " & o.Name & " (incomplete)"
+    End Function
+
+    ' The last two parts of a header path: um\wingdi.h.
+    Private Function ShortHeader(ByVal path As String) As String
+        Dim p As String = Replace(path, "/", "\")
+        Dim i As Long = InStrRev(p, "\")
+        If i <= 1 Then Return p
+        Dim j As Long = InStrRev(p, "\", i - 1)
+        Return Mid$(p, j + 1)
+    End Function
+
+    ' The "COM interfaces" report section (D-058): each interface and what uses it.
+    Private Sub ReportComInterfaces()
+        Dim o As OutsideType, f As MSXML2.IXMLDOMElement, r As MSXML2.IXMLDOMElement, p As ParamInfo, fi As FieldInfo
+        Dim users As String, tag As String
+        For Each o In mMap64.OutsideTypes()
+            If o.Kind = "com" Then
+                tag = "/* " & o.Name & " */"
+                users = ""
+                For Each f In mM64.Functions()
+                    Dim uses As Boolean = InStr(mMap64.ReturnOf(f), tag) > 0
+                    For Each p In mMap64.ParamsOf(f)
+                        If InStr(p.TypeText, tag) > 0 Then uses = True
+                    Next
+                    If uses Then users &= If(Len(users) > 0, ", ", "") & mM64.Attr(f, "name")
+                Next
+                For Each r In mM64.Records()
+                    For Each fi In mMap64.FieldsOf(r)
+                        If InStr(fi.TypeText, tag) > 0 Then users &= If(Len(users) > 0, ", ", "") & mM64.NameOf(r) & "." & fi.Name
+                    Next
+                Next
+                Rep "COM interfaces", o.Name & " (" & ShortHeader(o.HeaderPath) & "): written LongPtr /* " & o.Name & " */; pass ObjPtr(obj) of a tB interface reference; " & _
+                    "write the Interface in tB to call it. Used by: " & If(Len(users) > 0, users, "(nothing directly)")
+            End If
         Next
     End Sub
 
