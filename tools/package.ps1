@@ -145,6 +145,8 @@ if ($bad.Count -gt 0) {
 Write-Host "PASS package: layout, licences, docs, tbBlob --check with the bundled CastXML, a generation from the package"
 if (-not $SelfTest) {
     $mb = (Get-ChildItem $dest -Recurse -File | Measure-Object Length -Sum).Sum / 1MB
+    $v = (Get-Item $exe).VersionInfo
     Write-Host ("package ready: {0} ({1:N0} MB) -- copy this folder to the target machine" -f $dest, $mb)
+    Write-Host ("version {0}.{1}.{2}, {3}" -f $v.FileMajorPart, $v.FileMinorPart, $v.FileBuildPart, $v.Comments)
 }
 exit 0

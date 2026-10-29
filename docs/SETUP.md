@@ -184,7 +184,12 @@ From a fresh clone, with the dependencies in
    vcpkg install --triplet x64-windows
    ```
 2. `powershell -ExecutionPolicy Bypass -File tests\import.ps1` rebuilds `tbBlob.twinproj` from
-   `Source\`, using the import/export tool checked in at `tools\impexp\Build\`.
+   `Source\`, using the import/export tool checked in at `tools\impexp\Build\`. It writes the last
+   commit's short hash into the version's Comments field (`commit 1a2b3c4`, with `-modified` when
+   there are uncommitted changes), so a built `tbBlob.exe` shows which source it came from:
+   `(Get-Item tbBlob.exe).VersionInfo.Comments` in PowerShell. The version number itself (1.0.2) is set by hand in
+   `Source\Settings` (`project.versionMajor`, `versionMinor`, `versionBuild`); bump it for each
+   release.
 3. Open `tbBlob.twinproj` in the twinBASIC IDE and compile it as **win64**. The EXE goes to
    `Build\tbBlob_win64.exe`.
 4. `powershell -ExecutionPolicy Bypass -File tools\package.ps1` builds the distributable in

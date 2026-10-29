@@ -86,6 +86,7 @@
 | D-067 | 28.0 | Task-only | Union accessors copy with tB's native vbaCopyBytes, not a RtlMoveMemory Declare | Active |
 | D-068 | 29.0 | Task-only | Gaps cairo showed: outside callback typedefs become delegates; anonymous struct types named after their field | Active |
 | D-069 | 30.0 | Project-wide | Calling a Type's method on an array element is not safe (crashed when tested on tB BETA 1011, cause not established): copy the element first; accessors unchanged | Active |
+| D-070 | Release | Project-wide | Version 1.0.2 set by hand in Source\Settings, no auto-increment; the last commit's short hash in the version's Comments, added by tests\import.ps1 | Active |
 
 ---
 ### D-001 — tB UDT layout equals C natural alignment for all 85 libgit2 structs, both archs (Task: Spike)
@@ -943,3 +944,15 @@
   - To be raised with twinBASIC with the minimal repro (a Type with a method, an array of it, `x(1).Method()`), to learn whether it is intended or a defect. If a later tB build makes the call safe, or the cause turns out to call for a different form, this entry is superseded.
 - Rationale: emitting the accessors as module-level functions taking the Type `ByRef` would avoid the crash, but changes the API every consumer writes against (`v.header` becomes `cairo_path_data_t_header(v)`) for a crash whose cause is not yet understood.
 - Alternatives considered: module-level accessor functions (above); fields overlapping the storage instead of accessors (tB has no overlapping fields, D-018).
+
+### D-070 — Version set by hand; the commit hash in the version's Comments (Release)
+- Date: 2026-10-29
+- Scope: Project-wide
+- Status: Active
+- Context: the user asked for the distributable to carry a version that tells builds apart. `Source\Settings` had `project.versionAutoIncrement: Revision` and no version numbers (the EXE said `1.00`). tB increments the revision only in the IDE after a build and saves it to `tbBlob.twinproj`, which `tests\import.ps1` rebuilds from `Source\` before every compile (D-010), so the bump is lost; a tblaunch build does not increment at all.
+- Decision:
+  - The version is 1.0.2 (`versionMajor` 1, `versionMinor` 0, `versionBuild` 2, `versionRevision` 0) in `Source\Settings`, bumped by hand for each release; `versionAutoIncrement` is `None`.
+  - `tests\import.ps1` puts `commit <short hash>` in `project.versionComments`, with `-modified` when the working tree has uncommitted changes. It writes this into a temporary copy of `Source\` that it packs, never into `Source\Settings`, since committing the hash would change it. `tools\package.ps1` prints the packaged version and commit.
+  - tB writes the FileVersion/ProductVersion strings with a two-digit minor (`1.00.2`), as VB6 did; no setting changes that. The numeric version (`VS_FIXEDFILEINFO`) is exactly 1.0.2.0.
+- Rationale: tB has no setting for a free-text ProductVersion, so the hash goes in Comments, the version field that takes text. A hash names the exact source; an auto-incremented number would need a counter outside the repo.
+- Alternatives considered: auto-increment from `import.ps1` (Source\Settings changes on every compile); the git commit count as the revision (differs between branches, same number for rebuilds of one commit); rewriting the version strings in the built EXE after the build (another tool in the build for a cosmetic difference).

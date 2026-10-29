@@ -59,7 +59,11 @@
 	"project.startupObject": "Sub Main",
 	"project.terminalServerAware": true,
 	"project.useProjectIdForTypeLibraryId": true,
-	"project.versionAutoIncrement": "Revision",
+	"project.versionAutoIncrement": "None",
+	"project.versionBuild": 2,
+	"project.versionMajor": 1,
+	"project.versionMinor": 0,
+	"project.versionRevision": 0,
 	"project.warnings": {
 		"errors": [],
 		"hints": [],
