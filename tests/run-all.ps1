@@ -82,6 +82,8 @@ Test-Harness 'harness-fixture' 'harness_fixture' @()
 & powershell -NoProfile -ExecutionPolicy Bypass -File "$root\tests\harness-libgit2\setup_fixture.ps1" | Out-Null
 if ($LASTEXITCODE -ne 0) { Write-Host "FAIL harness-libgit2: setup_fixture.ps1 failed" }
 Test-Harness 'harness-libgit2' 'harness_libgit2' @("$root\tests\harness-fixture\Sources\Results.twin", "$root\tests\harness-fixture\Sources\Utf8.twin")
+# cairo (tasks 29, 30; D-055): two DLLs, outside types, a C++-only header skipped
+Test-Harness 'harness-cairo' 'harness_cairo' @("$root\tests\harness-fixture\Sources\Results.twin", "$root\tests\harness-fixture\Sources\Utf8.twin")
 
 # 7. The verdict script's own tests (task 13): its judge on fake inputs.
 $out = & powershell -NoProfile -ExecutionPolicy Bypass -File "$root\tests\verdict.ps1" -SelfTest 2>&1

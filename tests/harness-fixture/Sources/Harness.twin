@@ -587,7 +587,26 @@ Module Harness
         Results.Check "21.opaque_new returns an opaque alias", op <> 0
         Results.CheckEq "21.opaque_value", tbw_opaque_value(op), 42
         tbw_opaque_free op
+        ' D-068: an outside callback type (a delegate) as an outside struct's field
+        Dim hk As OUT_HOOKS
+        hk.hook = AddressOf HookTimesThree
+        hk.ctx = 7
+        Results.CheckEq "21.call_hook: an outside delegate field, called by C", tbw_call_hook(hk, 5), 22
+        ' D-068: a union of anonymous structs, each a Type named after its field
+        Dim pd As OUT_PATH_DATA
+        tbw_make_path_header pd, 2, 9
+        Dim hdr As OUT_PATH_DATA_header = pd.header
+        Results.Check "21.make_path_header read through the anonymous struct's accessor", hdr.type = 2 And hdr.length = 9, hdr.type & "," & hdr.length
+        Dim pt As OUT_PATH_DATA_point
+        pt.x = 1.25
+        pt.y = 2.5
+        pd.point = pt
+        Results.CheckEq "21.path_point_sum of a point written in tB", tbw_path_point_sum(pd), 3.75
     End Sub
+
+    Private Function HookTimesThree CDecl(ByVal ctx As LongPtr, ByVal value As Long) As Long
+        Return CLng(ctx) + value * 3
+    End Function
 
     ' ---- 20. a second DLL of the library (D-053): tbfixture_ext.h binds to tbfixture_ext.dll ----
     Private Sub SecondDll()

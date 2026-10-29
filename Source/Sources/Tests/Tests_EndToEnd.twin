@@ -17,6 +17,7 @@ Module Tests_EndToEnd
         SelfTest.Add "pipeline: a failure while generating names the item, its header and the original error", MODULE_ID, 10
         SelfTest.Add "end to end: --also adds the extra header's module (D-033)", MODULE_ID, 11, True
         SelfTest.Add "end to end: --also headers CastXML cannot read are skipped and reported; the rest is generated as without them; a bad entry header still fails (D-057)", MODULE_ID, 12, True
+        SelfTest.Add "end to end: cairo 1.18.4 in one run: both DLLs, counts against the export tables, cairo-dwrite.h skipped, every type defined (D-055)", MODULE_ID, 13, True
     End Sub
 
     Public Sub RunTest(ByVal index As Long)
@@ -33,6 +34,7 @@ Module Tests_EndToEnd
             Case 10: FailureNamesItem
             Case 11: AlsoEndToEnd
             Case 12: SkipUnreadableHeaders
+            Case 13: CairoCounts
             Case Else: Err.Raise SelfTest.CHECK_FAILED, , "no test " & index & " in Tests_EndToEnd"
         End Select
     End Sub
@@ -259,6 +261,149 @@ Module Tests_EndToEnd
         SelfTest.AssertTrue "names its header and line", InStr(Pipeline.LastError, "tbfixture.h:") > 0, "LastError=[" & Pipeline.LastError & "]"
         SelfTest.AssertTrue "keeps the original error", InStr(Pipeline.LastError, "forced failure (test hook)") > 0, "LastError=[" & Pipeline.LastError & "]"
         SelfTest.AssertTrue "on the console too", InStr(out, "delegate tbf_visit_cb") > 0, out
+    End Sub
+
+    ' ---- cairo (task 29.0, D-055) --------------------------------------------------------
+
+    ' tB's built-in type names, which generated code may use without defining them.
+    Private Function IsBuiltinType(ByVal n As String) As Boolean
+        Select Case LCase$(n)
+            Case "byte", "integer", "long", "longlong", "longptr", "single", "double", "currency", "string", "boolean", "variant", "object", "any", "date", "decimal"
+                Return True
+        End Select
+        Return False
+    End Function
+
+    ' The type names used after " As " in text (module qualification and array parentheses
+    ' dropped) that text does not define as a Type, Enum, Alias or Delegate and tB does not
+    ' build in -- D-052's dangling names. "" when there are none.
+    Private Function UndefinedTypes(ByVal text As String) As String
+        Dim defined As New Collection, missing As New Collection
+        defined.KeyCompareMode = vbTextCompare
+        missing.KeyCompareMode = vbTextCompare
+        Dim lines() As String = Split(Replace(text, vbCr, ""), vbLf)
+        Dim i As Long, s As String, w() As String, k As Long
+        For i = 0 To UBound(lines)
+            s = Trim$(lines(i))
+            w = Split(s, " ")
+            For k = 0 To UBound(w) - 1
+                Select Case w(k)
+                    Case "Type", "Enum", "Alias"
+                        If k > 0 Then
+                            If w(k - 1) = "Public" Or w(k - 1) = "Private" Then
+                                If Not defined.Exists(w(k + 1)) Then defined.Add True, w(k + 1)
+                            End If
+                        End If
+                    Case "Function", "Sub"
+                        If k > 0 Then
+                            If w(k - 1) = "Delegate" And Not defined.Exists(w(k + 1)) Then defined.Add True, w(k + 1)
+                        End If
+                End Select
+            Next
+        Next
+        Dim p As Long, j As Long, n As String, code As String, inComment As Boolean
+        For i = 0 To UBound(lines)
+            ' the code outside /* */ comments (doc comments span lines) and before a ' comment
+            s = lines(i)
+            code = ""
+            Do While Len(s) > 0
+                If inComment Then
+                    p = InStr(s, "*/")
+                    If p = 0 Then Exit Do
+                    s = Mid$(s, p + 2)
+                    inComment = False
+                Else
+                    p = InStr(s, "/*")
+                    If p = 0 Then
+                        code &= s
+                        Exit Do
+                    End If
+                    code &= Left$(s, p - 1)
+                    s = Mid$(s, p + 2)
+                    inComment = True
+                End If
+            Loop
+            s = code
+            If InStr(s, "'") > 0 Then s = Left$(s, InStr(s, "'") - 1)
+            p = InStr(s, " As ")
+            Do While p > 0
+                j = p + 4
+                Do While j <= Len(s)
+                    If Not (Mid$(s, j, 1) Like "[A-Za-z0-9_.]") Then Exit Do
+                    j += 1
+                Loop
+                n = Mid$(s, p + 4, j - p - 4)
+                If InStrRev(n, ".") > 0 Then n = Mid$(n, InStrRev(n, ".") + 1)
+                If Len(n) > 0 And Not IsBuiltinType(n) And Not defined.Exists(n) And Not missing.Exists(n) Then missing.Add n, n
+                p = InStr(j, s, " As ")
+            Loop
+        Next
+        Dim r As String, v As Variant
+        For Each v In missing
+            r &= v & " "
+        Next
+        Return Trim$(r)
+    End Function
+
+    ' The lines of a report section, without its heading.
+    Private Function Section(ByVal report As String, ByVal title As String) As String
+        Dim a As Long = InStr(report, vbCrLf & "## " & title & vbCrLf)
+        If a = 0 Then Return "(no section " & title & ")"
+        a += Len(vbCrLf & "## " & title & vbCrLf)
+        Dim b As Long = InStr(a, report, vbCrLf & "## ")
+        If b = 0 Then b = Len(report) + 1
+        Dim s As String = Mid$(report, a, b - a)
+        Do While Right$(s, 2) = vbCrLf
+            s = Left$(s, Len(s) - 2)
+        Loop
+        Return Trim$(s)
+    End Function
+
+    Private Function Occurrences(ByVal s As String, ByVal part As String) As Long
+        Return (Len(s) - Len(Replace(s, part, ""))) \ Len(part)
+    End Function
+
+    ' The same command line as tests\harness-cairo\build-project.ps1.
+    Private Sub CairoCounts()
+        Dim x64 As String = SelfTest.RepoRoot() & "\cairo\vcpkg_installed\x64-windows"
+        Dim bin86 As String = SelfTest.RepoRoot() & "\cairo\vcpkg_installed_x86\x86-windows\bin"
+        SelfTest.AssertTrue "cairo is installed (from cairo\ run: vcpkg install --triplet x64-windows; vcpkg install --triplet x86-windows --x-install-root=vcpkg_installed_x86)", _
+            FileSys.KindOf(x64 & "\include\cairo\cairo.h") = FileSys.KIND_FILE And FileSys.KindOf(bin86 & "\cairo-2.dll") = FileSys.KIND_FILE
+        Dim t As String = SelfTest.NewTempFolder()
+        Dim also As String, h As Variant
+        For Each h In Array("cairo-pdf.h", "cairo-ps.h", "cairo-svg.h", "cairo-script.h", "cairo-tee.h", "cairo-win32.h", "cairo-ft.h", "cairo-script-interpreter.h", "cairo-dwrite.h")
+            also &= "|--also|" & h
+        Next
+        Dim out As String
+        Dim started As Double = Timer
+        Dim code As Long = RunCli(x64 & "\include\cairo|cairo.h|" & x64 & "\bin|" & t & "\out|--castxml|" & RepoCastXml() & "|--x86-dll|" & bin86 & _
+            "|-I|" & x64 & "\include|--name|Cairo" & also, out)
+        SelfTest.Info "cairo end to end in " & Format$(Timer - started, "0.0") & " s"
+        Dim report As String, all As String, files As String, n As Variant
+        If code = 0 Then
+            report = FileSys.ReadTextUtf8(t & "\out\report.md")
+            files = Names(t & "\out\Source")
+            For Each n In Split(files, ";")
+                If Len(n) > 0 Then all &= FileSys.ReadTextUtf8(t & "\out\Source\" & n) & vbCrLf
+            Next
+        End If
+        FileSys.RemovePath t
+        SelfTest.AssertTrue "exit code 0", code = 0, "exit " & code & "; tbBlob said: " & Replace(out, vbLf, " / ")
+        SelfTest.AssertEq "declares bound to cairo-2.dll", Occurrences(all, " Lib ""cairo-2.dll"""), 409
+        SelfTest.AssertEq "declares bound to cairo-script-interpreter-2.dll", Occurrences(all, " Lib ""cairo-script-interpreter-2.dll"""), 10
+        SelfTest.AssertEq "exported but not declared: the 5 dwrite functions and one in no public header", Section(report, "Exported but not declared"), _
+            "- cairo-2.dll: cairo_dwrite_font_face_create_for_dwrite_fontface" & vbCrLf & "- cairo-2.dll: cairo_dwrite_font_face_get_measuring_mode" & vbCrLf & _
+            "- cairo-2.dll: cairo_dwrite_font_face_get_rendering_params" & vbCrLf & "- cairo-2.dll: cairo_dwrite_font_face_set_measuring_mode" & vbCrLf & _
+            "- cairo-2.dll: cairo_dwrite_font_face_set_rendering_params" & vbCrLf & "- cairo-2.dll: cairo_win32_get_system_text_quality"
+        SelfTest.AssertEq "declared but not exported: none", Section(report, "Declared but not exported"), "- none"
+        Dim skipped As String = Section(report, "Headers skipped")
+        SelfTest.AssertTrue "cairo-dwrite.h skipped, the only one", Left$(skipped, 18) = "- cairo-dwrite.h (" And Occurrences(skipped, vbCrLf & "- ") = 0 And InStr(skipped, "DWrite font backend requires C++") > 0, skipped
+        SelfTest.AssertEq "no mapping notes", Section(report, "Mapping notes"), "- none"
+        SelfTest.AssertEq "no x86/x64 disagreements", Section(report, "x86/x64 disagreements"), "- none"
+        SelfTest.AssertEq "every type used is defined (D-052)", UndefinedTypes(all), ""
+        For Each n In Array("windef.twin;", "wingdi.twin;", "freetype.twin;", "fontconfig.twin;")
+            SelfTest.AssertTrue "outside module " & n, InStr(files, n) > 0, files
+        Next
     End Sub
 
     Private Sub LibGit2EndToEnd()

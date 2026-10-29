@@ -1,0 +1,77 @@
+' Runtime checks of the cairo 1.18.4 bindings that tbBlob generated (task 29; D-055).
+' Each group runs under its own error handler, so an error is a FAIL line, not the end of the run.
+' Results.twin and Utf8.twin are shared with tests\harness-fixture. Memory is read with tB's native
+' vbaCopyBytes (D-067).
+Module Harness
+    Private Declare PtrSafe Function GetModuleFileNameW Lib "kernel32" (ByVal hModule As LongPtr, ByVal lpFilename As LongPtr, ByVal nSize As Long) As Long
+    Private Declare PtrSafe Function GetModuleHandleW Lib "kernel32" (ByVal lpModuleName As LongPtr) As LongPtr
+
+    Private Const GROUPS As Long = 1
+    #If Win64 Then
+        Private Const VCPKG_BIN As String = "\cairo\vcpkg_installed\x64-windows\bin"
+    #Else
+        Private Const VCPKG_BIN As String = "\cairo\vcpkg_installed_x86\x86-windows\bin"
+    #End If
+
+    Public Sub Main()
+        Results.Start
+        Dim p As LongPtr
+        Results.Info "0.arch", Results.Arch() & " LenB(LongPtr)=" & LenB(p)
+        If Not Boundary() Then
+            Results.Info "0.summary", "passed=" & Results.Passed & " failed=" & Results.Failed
+            Exit Sub
+        End If
+        Dim g As Long
+        For g = 1 To GROUPS
+            RunGroup g
+        Next
+        Results.Info "0.summary", "passed=" & Results.Passed & " failed=" & Results.Failed
+    End Sub
+
+    Private Sub RunGroup(ByVal g As Long)
+        On Error GoTo failed
+        Select Case g
+            Case 1: Layout
+        End Select
+        Exit Sub
+    failed:
+        Results.Fail "group " & g & " raised an error", Err.Number & ": " & Err.Description
+    End Sub
+
+    ' ---- helpers ------------------------------------------------------------------------------
+
+    ' The repository root (the harness is tests\harness-cairo).
+    Private Function RepoRoot() As String
+        Dim h As String = Results.HarnessDir()
+        Return Left$(h, InStrRev(Left$(h, InStrRev(h, "\") - 1), "\") - 1)
+    End Function
+
+    Private Function ModulePath(ByVal h As LongPtr) As String
+        Dim buf As String = String$(1024, vbNullChar)
+        Dim n As Long = GetModuleFileNameW(h, StrPtr(buf), 1024)
+        Return Left$(buf, n)
+    End Function
+
+    ' ---- 0. both DLLs loaded through the generated loader (D-053), version --------------------
+    Private Function Boundary() As Boolean
+        Results.Check "0.loader IsLoaded before Load", Not Cairo_Loader.IsLoaded()
+        Dim bin As String = RepoRoot() & VCPKG_BIN
+        Dim h As LongPtr, msg As String
+        On Error Resume Next
+        h = Cairo_Loader.Load(bin)
+        msg = Err.Number & ": " & Err.Description
+        On Error GoTo 0
+        Results.Check "0.loader Load(vcpkg bin) loads cairo-2.dll and cairo-script-interpreter-2.dll", h <> 0 And Cairo_Loader.IsLoaded(), If(h = 0, msg, bin)
+        If h = 0 Then Return False
+        Results.Check "0.cairo-2.dll is this architecture's", LCase$(ModulePath(GetModuleHandleW(StrPtr("cairo-2.dll")))) = LCase$(bin & "\cairo-2.dll"), ModulePath(GetModuleHandleW(StrPtr("cairo-2.dll")))
+        Results.Check "0.the interpreter DLL too", LCase$(ModulePath(GetModuleHandleW(StrPtr("cairo-script-interpreter-2.dll")))) = LCase$(bin & "\cairo-script-interpreter-2.dll")
+        Results.CheckEq "0.cairo_version", cairo_version(), 11804
+        Return True
+    End Function
+
+    ' ---- 1. layout (PRD req. 34): cairo's records and the imported outside ones -----------------
+    Private Sub Layout()
+        Dim mismatches As String = Cairo_LayoutCheck.LayoutMismatches()
+        Results.Check "1.layout every generated Type matches CastXML", Len(mismatches) = 0, Replace(mismatches, vbLf, "; ")
+    End Sub
+End Module

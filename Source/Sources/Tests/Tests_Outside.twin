@@ -104,7 +104,7 @@ Module Tests_Outside
             s &= o.Name & ":" & o.Kind & "|"
         Next
         SelfTest.AssertEq "kinds, in the order reached", s, "tagLOGFONTW:struct|HDC:handle|tagPOINT:struct|tagRECT:struct|HBRUSH:handle|FILE:opaque|" & _
-            "IStream:com|OUT_MODE:enum|OUT_RECP:handle|OUT_REC:struct|OUT_INNER:struct|OUT_OPAQUE:opaque|"
+            "IStream:com|OUT_MODE:enum|OUT_RECP:handle|OUT_REC:struct|OUT_INNER:struct|OUT_OPAQUE:opaque|OUT_HOOKS:struct|OUT_HOOK_FN:delegate|OUT_PATH_DATA:struct|"
     End Sub
 
     Private Sub Mapping()
@@ -137,6 +137,10 @@ Module Tests_Outside
         HasLine outlib, "the outside enum", "    Public Enum OUT_MODE"
         HasLine outlib, "the transitively imported struct", "    Public Type OUT_INNER"
         SelfTest.AssertTrue "an unreached struct is not imported", InStr(outlib, "OUT_UNUSED") = 0
+        HasLine outlib, "an outside callback type as a delegate (D-068)", "    Public Delegate Function OUT_HOOK_FN CDecl ( _"
+        HasLine outlib, "the delegate as a field", "        hook As OUT_HOOK_FN  ' C: OUT_HOOK_FN"
+        HasLine outlib, "an anonymous struct named after its field (D-068)", "    Public Type OUT_PATH_DATA_header"
+        HasLine outlib, "the union accessor uses it", "        Public Property Get header() As OUT_PATH_DATA_header"
         Dim all As String, n As Variant
         For Each n In Array("windef", "wingdi", "outlib", "corecrt_wstdio", "tbfixture", "tbfixture_win")
             all &= Source(n)
@@ -154,6 +158,8 @@ Module Tests_Outside
         Dim m64 As TypeMapper = Mapper("x64")
         Dim m86 As TypeMapper = Mapper("x86")
         SelfTest.AssertTrue "the x86 twin of an outside record is found", Not m86.FindRecord("tagLOGFONTW") Is Nothing
+        SelfTest.AssertTrue "and of an anonymous record (D-068)", Not m86.FindRecord("OUT_PATH_DATA_point") Is Nothing
+        SelfTest.AssertTrue "an anonymous record is layout-checked", InStr(t, """OUT_PATH_DATA_point size""") > 0, "length " & Len(t)
         SelfTest.AssertEq "no disagreements", m64.Disagreements(m86).Count, 0
     End Sub
 

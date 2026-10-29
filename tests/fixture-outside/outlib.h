@@ -28,6 +28,27 @@ typedef OUT_REC *OUT_RECP;
 /** An outside incomplete struct: only ever a pointer. */
 typedef struct OUT_OPAQUE OUT_OPAQUE;
 
+/** A callback type of another library (FreeType's FT_Alloc_Func shape): imported as a delegate. */
+typedef int (*OUT_HOOK_FN)(void *ctx, int value);
+
+/** An outside struct with a callback field (FT_MemoryRec_'s shape). */
+typedef struct OUT_HOOKS {
+    OUT_HOOK_FN hook;
+    void *ctx;
+} OUT_HOOKS;
+
+/** A union of anonymous structs (cairo_path_data_t's shape): each gets a Type named
+ * OUT_PATH_DATA_header / OUT_PATH_DATA_point (D-068). */
+typedef union OUT_PATH_DATA {
+    struct {
+        int type;
+        int length;
+    } header;
+    struct {
+        double x, y;
+    } point;
+} OUT_PATH_DATA;
+
 /** Never used by tbfixture: must not be imported. */
 typedef struct OUT_UNUSED {
     int never;

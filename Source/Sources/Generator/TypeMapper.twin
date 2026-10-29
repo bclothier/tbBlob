@@ -21,12 +21,15 @@ Class TypeMapper
     Private mOutside As Collection          ' OutsideType, in the order reached (OutsideTypes)
     Private mOutsideSeen As Collection      ' element id -> True: already walked
     Private mOutsideNames As Collection     ' tB name -> True: each outside name once (D-065)
+    Private mAnonRecords As Collection      ' anonymous structs/unions used as a named field's type (D-068)
+    Private mAnonSeen As Collection
 
     Public Sub Init(m As CxModel)
         Set Model = m
         Set mRecordIndex = Nothing
         Set mFunctionIndex = Nothing
         Set mOutside = Nothing
+        Set mAnonRecords = Nothing
     End Sub
 
     ' ---- lookups ---------------------------------------------------------------------
@@ -45,6 +48,12 @@ Class TypeMapper
             Dim o As OutsideType
             For Each o In OutsideTypes()
                 If o.Kind = "struct" And Not mRecordIndex.Exists(o.Name) Then mRecordIndex.Add o.Element, o.Name
+            Next
+            ' and the anonymous records named after their parent and field (D-068)
+            Dim a As MSXML2.IXMLDOMElement
+            For Each a In AnonRecords()
+                n = RecordName(a)
+                If Len(n) > 0 And Not mRecordIndex.Exists(n) Then mRecordIndex.Add a, n
             Next
         End If
         If Not mRecordIndex.Exists(name) Then Return Nothing
@@ -161,6 +170,10 @@ Class TypeMapper
                     ReachType Model.Attr(e, "type")
                 ElseIf IsStdPointerType(Model.Attr(e, "name")) Then
                     AddOutside e, Model.Attr(e, "name"), "opaque"
+                ElseIf IsFunctionPointerTypedef(e) Then
+                    ' a callback type (FT_Alloc_Func): a delegate in its header's module (D-068)
+                    AddOutside e, Model.Attr(e, "name"), "delegate"
+                    ReachType Model.Attr(e, "type")
                 Else
                     Set s = HandlePointee(e)
                     If Not s Is Nothing Then
@@ -298,6 +311,83 @@ Class TypeMapper
         If mPointerUseKeys.Exists(text) Then Exit Sub
         mPointerUseKeys.Add True, text
         PointerUses.Add text
+    End Sub
+
+    Private Function IsFunctionPointerTypedef(ByVal td As MSXML2.IXMLDOMElement) As Boolean
+        Dim t As MSXML2.IXMLDOMElement = Model.Strip(Model.Attr(td, "type"))
+        If Model.Tag(t) <> "PointerType" Then Return False
+        Return Model.Tag(Model.Strip(Model.Attr(t, "type"))) = "FunctionType"
+    End Function
+
+    ' ---- anonymous records (D-068) ------------------------------------------------------------
+
+    ' A record's tB name: its own or its typedef's, else <parent>_<field> for an anonymous struct or
+    ' union that is the type of a named field (cairo_path_data_t's header and point); "" when it is
+    ' neither.
+    Public Function RecordName(ByVal r As MSXML2.IXMLDOMElement) As String
+        Dim n As String = Model.NameOf(r)
+        If Len(n) > 0 Then Return n
+        Dim parent As MSXML2.IXMLDOMElement = Model.ById(Model.Attr(r, "context"))
+        If parent Is Nothing Then Return ""
+        Dim id As Variant, f As MSXML2.IXMLDOMElement
+        For Each id In Split(Trim$(Model.Attr(parent, "members")), " ")
+            Set f = Model.ById(id)
+            If Not f Is Nothing Then
+                If Model.Tag(f) = "Field" And Len(Model.Attr(f, "name")) > 0 Then
+                    If Model.Attr(FieldRecordType(f), "id") = Model.Attr(r, "id") Then
+                        Dim p As String = RecordName(parent)
+                        If Len(p) = 0 Then Return ""
+                        Return p & "_" & Model.Attr(f, "name")
+                    End If
+                End If
+            End If
+        Next
+        Return ""
+    End Function
+
+    ' A field's type with qualifiers and array dimensions stripped.
+    Private Function FieldRecordType(ByVal f As MSXML2.IXMLDOMElement) As MSXML2.IXMLDOMElement
+        Dim t As MSXML2.IXMLDOMElement = Model.Strip(Model.Attr(f, "type"))
+        Do While Model.Tag(t) = "ArrayType"
+            Set t = Model.Strip(Model.Attr(t, "type"))
+        Loop
+        Return t
+    End Function
+
+    ' The anonymous records RecordName names, reached from the library's records and the imported
+    ' outside structs (and from each other), each once, parents first.
+    Public Function AnonRecords() As Collection
+        If Not mAnonRecords Is Nothing Then Return mAnonRecords
+        Set mAnonRecords = New Collection
+        Set mAnonSeen = New Collection
+        mAnonSeen.KeyCompareMode = vbBinaryCompare
+        Dim r As MSXML2.IXMLDOMElement, o As OutsideType
+        For Each r In Model.Records()
+            FindAnon r
+        Next
+        For Each o In OutsideTypes()
+            If o.Kind = "struct" Then FindAnon o.Element
+        Next
+        Return mAnonRecords
+    End Function
+
+    Private Sub FindAnon(ByVal record As MSXML2.IXMLDOMElement)
+        Dim id As Variant, f As MSXML2.IXMLDOMElement, t As MSXML2.IXMLDOMElement
+        For Each id In Split(Trim$(Model.Attr(record, "members")), " ")
+            Set f = Model.ById(id)
+            If Not f Is Nothing Then
+                If Model.Tag(f) = "Field" And Len(Model.Attr(f, "name")) > 0 Then
+                    Set t = FieldRecordType(f)
+                    If (Model.Tag(t) = "Struct" Or Model.Tag(t) = "Union") And Len(Model.NameOf(t)) = 0 And Not Model.IsOpaque(t) Then
+                        If Not mAnonSeen.Exists(Model.Attr(t, "id")) Then
+                            mAnonSeen.Add True, Model.Attr(t, "id")
+                            mAnonRecords.Add t
+                            FindAnon t
+                        End If
+                    End If
+                End If
+            End If
+        Next
     End Sub
 
     ' DECLARE_HANDLE's placeholder struct: struct X__ { int unused; }.
@@ -448,6 +538,7 @@ Class TypeMapper
         Else
             r.Kind = "record"
             r.TbType = IIf(Len(name) > 0, name, typedefName)
+            If Len(r.TbType) = 0 Then r.TbType = RecordName(s)     ' anonymous, a field's type (D-068)
         End If
         Return r
     End Function
@@ -610,7 +701,7 @@ Class TypeMapper
     ' The members of a struct or union, as they are to be emitted (see FieldInfo.Kind).
     Public Function FieldsOf(ByVal record As MSXML2.IXMLDOMElement) As Collection
         Dim fields As New Collection
-        Dim owner As String = Model.NameOf(record)
+        Dim owner As String = RecordName(record)
         If Model.Tag(record) = "Union" Then
             AddUnion fields, record, "union_data", 0, owner
             Return fields
@@ -906,6 +997,17 @@ NextMember:
             Else
                 CompareFields d, Model.NameOf(r), FieldsOf(r), other.FieldsOf(o)
                 If Packing(r) <> other.Packing(o) Then d.Add "record " & Model.NameOf(r) & ": packing " & Packing(r) & " vs " & other.Packing(o)
+            End If
+        Next
+        ' anonymous records named after their field are generated too (D-068)
+        Dim ar As MSXML2.IXMLDOMElement
+        For Each ar In AnonRecords()
+            CurrentItem = "record " & RecordName(ar) & " (" & Model.FileOf(ar) & ":" & Model.Attr(ar, "line") & ")"
+            Set o = other.FindRecord(RecordName(ar))
+            If o Is Nothing Then
+                d.Add "record " & RecordName(ar) & " exists in only one architecture"
+            Else
+                CompareFields d, RecordName(ar), FieldsOf(ar), other.FieldsOf(o)
             End If
         Next
         ' imported outside structs are generated too, so they must agree as well (D-054)

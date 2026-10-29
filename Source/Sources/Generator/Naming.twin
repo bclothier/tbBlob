@@ -108,7 +108,14 @@ Module Naming
                     Next
                 Case "handle", "opaque"
                     names.Add o.Name, "type"
+                Case "delegate"
+                    names.Add o.Name, "delegate"
             End Select
+        Next
+        ' anonymous records, named <parent>_<field> (D-068)
+        For Each el In map.AnonRecords()
+            names.Add map.RecordName(el), "type"
+            Set ignored = map.FieldsOf(el)
         Next
         For Each s In map.SynthDelegates
             If Not names.IsTaken(s.Name) Then names.Add s.Name, "delegate"

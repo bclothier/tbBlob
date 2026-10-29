@@ -71,12 +71,21 @@ cairo's script interpreter is in `cairo-script-interpreter-2.dll`, the rest in `
 vcpkg's `bin` also holds FreeType, zlib and others, which do no harm:
 ```
 set CAIRO=C:\vcpkg\installed\x64-windows
-tbBlob %CAIRO%\include\cairo cairo.h %CAIRO%\bin C:\out\cairo -I %CAIRO%\include ^
-    --also cairo-script-interpreter.h --also cairo-pdf.h --also cairo-svg.h
+tbBlob %CAIRO%\include\cairo cairo.h %CAIRO%\bin C:\out\cairo -I %CAIRO%\include --name Cairo ^
+    --x86-dll C:\vcpkg\installed\x86-windows\bin ^
+    --also cairo-pdf.h --also cairo-ps.h --also cairo-svg.h --also cairo-script.h --also cairo-tee.h ^
+    --also cairo-win32.h --also cairo-ft.h --also cairo-script-interpreter.h --also cairo-dwrite.h
 ```
-The project is named `cairo` (after the entry header), and `cairo_Loader.Load(folder)` loads both
-DLLs. Were a function exported by two of the DLLs, the run would stop and name them;
-`--dll cairo_foo=cairo-2.dll` (or `--dll cairo-ft.h=cairo-2.dll` for a whole header) settles it.
+This is the run the tests use (`tests\harness-cairo\build-project.ps1`): 409 functions bind to
+`cairo-2.dll` and 10 to `cairo-script-interpreter-2.dll`, `Cairo_Loader.Load(folder)` loads both,
+and the Windows SDK, C runtime, FreeType and fontconfig types cairo uses are imported (see
+[Types from other headers](#types-from-other-headers)). `cairo-dwrite.h` is C++ only: it is skipped
+and reported, and its 5 functions are listed under "Exported but not declared". To use them, add
+the hand-written `tests\harness-cairo\Sources\cairo_dwrite.twin` to your project: the 5 declares
+(DirectWrite objects as `LongPtr /* IDWriteFontFace */` and `/* IDWriteRenderingParams */`) and the
+`DWRITE_MEASURING_MODE` enum. Were a function exported by two of the DLLs, the run would stop and
+name them; `--dll cairo_foo=cairo-2.dll` (or `--dll cairo-ft.h=cairo-2.dll` for a whole header)
+settles it.
 
 **Configuration macros and an extra include folder:**
 ```
@@ -171,6 +180,9 @@ loading them, then one section per kind of finding. Each entry gives its reason:
 - **Unsigned integers** are the signed type of the same width. Values with the top bit set read as
   negative numbers or bit patterns (`&H80000000`).
 - **Unions** are a storage field plus `Property Get`/`Let` per member: write `v.as_float`, not a field.
+  A member whose type is an anonymous struct gets a `Type` named after it, `<union>_<member>`
+  (`_cairo_path_data_t_header`): read it whole (`Dim h As _cairo_path_data_t_header = d.header`),
+  change it, and assign it back.
 - **Bitfields** are one storage field per group. Mask and shift to reach the bits; the comment says
   which bits are which.
 - **Variadic functions** (`...`) use `ByVal ParamArray args As Any()`. Pass variables as `ByVal x`,
@@ -226,6 +238,7 @@ the library uses, and everything those need, into one module per header, named a
 |---|---|---|
 | a struct, used by value, as a field, or through `T*` | the real `Type` (`ByRef As tagLOGFONTW` for `T*`), layout-checked like the library's own | a copy needs the real layout |
 | an enum | the `Enum` with its values | |
+| a callback type (`FT_Alloc_Func`) | a `Delegate` | `AddressOf` is checked against its signature |
 | a handle: `DECLARE_HANDLE` (`HDC`, `HWND`, `HBRUSH`) or a typedef to a pointer to a struct (`FT_Face`) | `Public Alias HDC As LongPtr`, passed `ByVal` | the value is the pointer; a pointer typedef's struct is still imported for reading fields |
 | an incomplete struct, or `FILE` | `Public Alias X As LongPtr`, `X*` passed `ByVal As X` | only ever a pointer (C11 7.21.3 for `FILE`) |
 | a COM interface pointer (`IStream*`) | `ByVal As LongPtr /* IStream */` | pass `ObjPtr(obj)` of a tB interface reference; write the `Interface` yourself to call its methods |

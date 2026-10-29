@@ -105,3 +105,19 @@ TBF_API void tbw_opaque_free(OUT_OPAQUE *o)
 {
     free(o);
 }
+
+TBF_API int tbw_call_hook(const OUT_HOOKS *hooks, int value)
+{
+    return hooks && hooks->hook ? hooks->hook(hooks->ctx, value) : -1;
+}
+
+TBF_API void tbw_make_path_header(OUT_PATH_DATA *d, int type, int length)
+{
+    d->header.type = type;
+    d->header.length = length;
+}
+
+TBF_API double tbw_path_point_sum(const OUT_PATH_DATA *d)
+{
+    return d->point.x + d->point.y;
+}

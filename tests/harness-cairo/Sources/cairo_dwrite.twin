@@ -1,0 +1,40 @@
+' Hand-written bindings for cairo-dwrite.h (D-059), to paste next to tbBlob's cairo bindings.
+' tbBlob reads headers as C and this one is C++ only (#error DWrite font backend requires C++), so it
+' is skipped and reported (D-057). Its 5 functions are extern "C" and exported undecorated by
+' cairo-2.dll; DirectWrite objects are COM interface pointers, written LongPtr /* IName */ as tbBlob
+' writes them (D-058): pass ObjPtr of a tB interface reference.
+Module cairo_dwrite
+    ' C: enum DWRITE_MEASURING_MODE (um\dcommon.h)
+    Public Enum DWRITE_MEASURING_MODE
+        DWRITE_MEASURING_MODE_NATURAL = 0
+        DWRITE_MEASURING_MODE_GDI_CLASSIC = 1
+        DWRITE_MEASURING_MODE_GDI_NATURAL = 2
+    End Enum
+
+    ' C: cairo_font_face_t * cairo_dwrite_font_face_create_for_dwrite_fontface(IDWriteFontFace * dwrite_font_face)
+    Public DeclareWide PtrSafe Function cairo_dwrite_font_face_create_for_dwrite_fontface CDecl Lib "cairo-2.dll" ( _
+        ByVal dwrite_font_face As LongPtr /* IDWriteFontFace */ _
+    ) As cairo_font_face_t
+
+    ' C: IDWriteRenderingParams * cairo_dwrite_font_face_get_rendering_params(cairo_font_face_t * font_face)
+    Public DeclareWide PtrSafe Function cairo_dwrite_font_face_get_rendering_params CDecl Lib "cairo-2.dll" ( _
+        ByVal font_face As cairo_font_face_t _
+    ) As LongPtr /* IDWriteRenderingParams */
+
+    ' C: void cairo_dwrite_font_face_set_rendering_params(cairo_font_face_t * font_face, IDWriteRenderingParams * params)
+    Public DeclareWide PtrSafe Sub cairo_dwrite_font_face_set_rendering_params CDecl Lib "cairo-2.dll" ( _
+        ByVal font_face As cairo_font_face_t, _
+        ByVal params As LongPtr /* IDWriteRenderingParams */ _
+    )
+
+    ' C: DWRITE_MEASURING_MODE cairo_dwrite_font_face_get_measuring_mode(cairo_font_face_t * font_face)
+    Public DeclareWide PtrSafe Function cairo_dwrite_font_face_get_measuring_mode CDecl Lib "cairo-2.dll" ( _
+        ByVal font_face As cairo_font_face_t _
+    ) As DWRITE_MEASURING_MODE
+
+    ' C: void cairo_dwrite_font_face_set_measuring_mode(cairo_font_face_t * font_face, DWRITE_MEASURING_MODE mode)
+    Public DeclareWide PtrSafe Sub cairo_dwrite_font_face_set_measuring_mode CDecl Lib "cairo-2.dll" ( _
+        ByVal font_face As cairo_font_face_t, _
+        ByVal mode As DWRITE_MEASURING_MODE _
+    )
+End Module

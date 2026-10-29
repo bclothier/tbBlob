@@ -84,6 +84,7 @@
 | D-065 | 27.0, 28.0 | Plan | Outside types revised: aliases are project-wide names; same-name Types are always qualified | Active |
 | D-066 | 27.0 | Task-only | Outside types as built: one walk, alias kinds from typedefs, integration tests instead of snapshots | Superseded (partial) by D-067 |
 | D-067 | 28.0 | Task-only | Union accessors copy with tB's native vbaCopyBytes, not a RtlMoveMemory Declare | Active |
+| D-068 | 29.0 | Task-only | Gaps cairo showed: outside callback typedefs become delegates; anonymous struct types named after their field | Active |
 
 ---
 ### D-001 — tB UDT layout equals C natural alignment for all 85 libgit2 structs, both archs (Task: Spike)
@@ -916,3 +917,16 @@
 - Rationale: a native intrinsic needs no declaration, so there is nothing to scope wrongly and nothing a test helper can mask.
 - Alternatives considered: one module-level `Private Declare RtlMoveMemory` per module with unions (compiles; built and tested first, then dropped for the native call); renaming the harness helper so it cannot mask (unnecessary once generated code declares nothing).
 - Verified under: tB BETA 1011, tblaunch builds for win32 and win64: the `--qualify-outside --pointer LOGFONTW` generation of the fixture (with `tbfixture_sys.h`, `tbfixture_ext.h`, `tbfixture_win.h`) builds untouched in a project with no `RtlMoveMemory` anywhere; the fixture harness's union checks (group 10: tagged and anonymous unions, the byte accessor) pass at run time on both, 205/205.
+
+---
+### D-068 — Gaps cairo showed: outside callback typedefs become delegates; anonymous struct types are named after their field (Task 29.0)
+- Date: 2026-10-29
+- Scope: Task-only
+- Status: Active
+- Context: the first full cairo generation (29.4) compiled with two kinds of errors. (1) FreeType's structs have callback fields (`FT_Alloc_Func`, `FT_Free_Func`, `FT_Stream_IoFunc`, `FT_Generic_Finalizer`, ...): outside function-pointer typedefs were classified as delegates but never emitted (only the library's typedefs were) -- D-052's dangling-name defect in another form. (2) `cairo_path_data_t` is a union whose members `header` and `point` have anonymous struct types: the accessors were written `As ` with no type, since an anonymous record had no name. libgit2 and tbfixture had neither shape.
+- Decision:
+  - An outside typedef of a pointer to a function is an outside type of kind `delegate`: emitted as a `Delegate` in its header's module, through the same code as library delegates (`EmitDelegateTypedef`), and registered as a project-wide name.
+  - An anonymous struct or union that is the type of a named field is a record named `<parent>_<field>` (`_cairo_path_data_t_header`; nested ones chain), from library records and imported outside structs alike (`TypeMapper.RecordName`, `AnonRecords`): emitted as a `Type`, layout-checked, registered, found by `FindRecord` for its x86 twin and compared in the x86/x64 check. Unnamed members keep D-018's handling (anonymous unions as storage; anonymous structs reported).
+  - Fixture: `outlib.h` gains `OUT_HOOK_FN` (a callback typedef) in `OUT_HOOKS` and `OUT_PATH_DATA` (a union of two anonymous structs, cairo's shape), used by `tbw_call_hook`, `tbw_make_path_header`, `tbw_path_point_sum`; harness group 21 calls them on win32 and win64 (a tB `CDecl` function as the outside delegate field, called by C; the anonymous struct read and written through the union accessors).
+- Rationale: both are generic C shapes, not cairo quirks; a name derived from the field is deterministic and readable, and matches how D-018 already names union storage.
+- Alternatives considered: `LongPtr` for outside callback fields (loses the signature tB checks `AddressOf` against); numbering anonymous records (`anon_1`) (not stable across header changes, not readable).

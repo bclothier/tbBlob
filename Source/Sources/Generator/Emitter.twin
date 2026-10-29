@@ -258,6 +258,9 @@ Class Emitter
         EmitOutside
         EmitDelegates
         Dim r As MSXML2.IXMLDOMElement
+        For Each r In mMap64.AnonRecords()
+            EmitType r      ' anonymous records named <parent>_<field> (D-068)
+        Next
         For Each r In mM64.Records()
             EmitType r
         Next
@@ -494,6 +497,10 @@ Class Emitter
                     Tally "outside aliases"
                 Case "com"
                     what = "COM interface, written LongPtr /* " & o.Name & " */, not imported (D-058)"
+                Case "delegate"
+                    EmitDelegateTypedef o.Element
+                    m = ModuleFor(o.HeaderPath)
+                    what = "callback type, imported as a delegate"
             End Select
             Rep "Outside types", o.Name & ": " & what & If(Len(m) > 0, ", module " & m, "") & " (" & ShortHeader(o.HeaderPath) & ")"
             Tally "outside types"
@@ -593,17 +600,7 @@ Class Emitter
         For Each td In mM64.Typedefs()
             If mMap64.Classify(mM64.Attr(td, "id")).Kind = "delegate" Then
                 SetItem "delegate", mM64.Attr(td, "name"), td
-                Set fn = PointeeFn(mM64, mM64.Attr(td, "id"))
-                Set fn86 = Nothing
-                Dim td86 As MSXML2.IXMLDOMElement = mMap86.FindTypedef(mM64.Attr(td, "name"))
-                If Not td86 Is Nothing Then Set fn86 = PointeeFn(mM86, mM86.Attr(td86, "id"))
-                m = ModuleFor(mM64.FileOf(td))
-                Set names = DocComments.ParamNamesFor(mPre, mM64, DeclaringTypedef(td), mMap64.ParamsOf(fn).Count, lost)
-                If Len(lost) > 0 Then Rep "Parameter names lost", mM64.Attr(td, "name") & ": " & lost
-                AddDoc m, td, ""
-                Add m, "' C: " & mM64.Attr(td, "name") & " = " & mMap64.CTypeText(mM64.Attr(td, "type"))
-                EmitDelegateLine m, mNames.TbName(mM64.Attr(td, "name"), "delegate"), fn, fn86, names
-                Tally "delegates"
+                EmitDelegateTypedef td
             End If
         Next
         Dim s As SynthDelegate
@@ -634,6 +631,21 @@ Class Emitter
         Next
     End Sub
 
+    ' A delegate for a function-pointer typedef, in its header's module (library or outside, D-068).
+    Private Sub EmitDelegateTypedef(ByVal td As MSXML2.IXMLDOMElement)
+        Dim fn As MSXML2.IXMLDOMElement, fn86 As MSXML2.IXMLDOMElement, m As String, lost As String, names As Collection
+        Set fn = PointeeFn(mM64, mM64.Attr(td, "id"))
+        Dim td86 As MSXML2.IXMLDOMElement = mMap86.FindTypedef(mM64.Attr(td, "name"))
+        If Not td86 Is Nothing Then Set fn86 = PointeeFn(mM86, mM86.Attr(td86, "id"))
+        m = ModuleFor(mM64.FileOf(td))
+        Set names = DocComments.ParamNamesFor(mPre, mM64, DeclaringTypedef(td), mMap64.ParamsOf(fn).Count, lost)
+        If Len(lost) > 0 Then Rep "Parameter names lost", mM64.Attr(td, "name") & ": " & lost
+        AddDoc m, td, ""
+        Add m, "' C: " & mM64.Attr(td, "name") & " = " & mMap64.CTypeText(mM64.Attr(td, "type"))
+        EmitDelegateLine m, mNames.TbName(mM64.Attr(td, "name"), "delegate"), fn, fn86, names
+        Tally "delegates"
+    End Sub
+
     Private Sub EmitDelegateLine(ByVal m As String, ByVal tbName As String, ByVal fn As MSXML2.IXMLDOMElement, ByVal fn86 As MSXML2.IXMLDOMElement, names As Collection)
         Dim ret As String = TbType(mMap64.ReturnOf(fn))
         Dim cc As String = If(fn86 Is Nothing, "CDecl", mMap86.CallConvOf(fn86))
@@ -643,7 +655,7 @@ Class Emitter
     End Sub
 
     Private Sub EmitType(ByVal r As MSXML2.IXMLDOMElement)
-        Dim cname As String = mM64.NameOf(r)
+        Dim cname As String = mMap64.RecordName(r)
         SetItem LCase$(mM64.Tag(r)), cname, r
         Dim tb As String = mNames.TbName(cname, "type")
         Dim m As String = ModuleFor(mM64.FileOf(r))
@@ -753,7 +765,7 @@ Class Emitter
         Next
         mLayout.Add "    End Sub"
         mLayout.Add ""
-        EmitTbLayout tb, mM64.NameOf(r), fields
+        EmitTbLayout tb, mMap64.RecordName(r), fields
     End Sub
 
     ' TbLayout(record, member): tB's own size ("") or offset of a member, by C names, so a harness

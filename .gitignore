@@ -2,6 +2,8 @@
 CastXML/vcpkg_installed/
 libgit2/vcpkg_installed/
 libgit2/vcpkg_installed_x86/
+cairo/vcpkg_installed/
+cairo/vcpkg_installed_x86/
 
 # twinBASIC build output (except the import/export tool the workflow depends on, D-047)
 Build/
