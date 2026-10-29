@@ -20,6 +20,7 @@ Class Emitter
     Private mMacros As MacroTable
     Private mMacros86 As MacroTable     ' Nothing: constants from the x64 dump only
     Private mPre As PreprocessedSource  ' Nothing: callback parameter names are reported lost
+    Private mSkipped As Collection      ' SkippedHeader: --also headers CastXML could not read (D-057)
     Private mDlls As DllSet             ' which DLL each function binds to, and x86 exports (D-053)
     Private mHeaderFolder As String
     Private mProject As String
@@ -64,6 +65,12 @@ Class Emitter
     ' (D-060). Call after Init, before Generate.
     Public Sub UsePreprocessed(pp As PreprocessedSource)
         Set mPre = pp
+    End Sub
+
+    ' The --also headers CastXML could not read (SkippedHeader), for the report's "Headers skipped"
+    ' section (D-057). Call after Init, before Generate.
+    Public Sub UseSkippedHeaders(skipped As Collection)
+        Set mSkipped = skipped
     End Sub
 
     ' ---- plumbing ----------------------------------------------------------------------
@@ -195,7 +202,7 @@ Class Emitter
         Set mLayoutCalls = New Collection
         Set mTbLayout = New Collection
         Set mTbLayoutCases = New Collection
-        mSections = Array("Renamed", "Type aliases", "Skipped macros", "Parameter names lost", "Structs passed or returned by value", _
+        mSections = Array("Headers skipped", "Renamed", "Type aliases", "Skipped macros", "Parameter names lost", "Structs passed or returned by value", _
             "Variadic functions", "stdcall functions", "Declared but not exported", "Exported but not declared", "Architecture-dependent constants", "Packing", "Unions", "Bitfields", "Mapping notes", "x86/x64 disagreements")
         Dim s As Variant
         For Each s In mSections
@@ -205,6 +212,15 @@ Class Emitter
         ErrorText = ""
         CurrentItem = ""
         On Error GoTo Failed
+        If Not mSkipped Is Nothing Then
+            Dim sk As SkippedHeader, errLine As Variant
+            For Each sk In mSkipped
+                Rep "Headers skipped", sk.Header & " (" & sk.Pass & " pass): CastXML could not read it, so its functions and types are not generated. CastXML said:"
+                For Each errLine In sk.ErrorLines
+                    mReport("Headers skipped").Add "  - " & errLine
+                Next
+            Next
+        End If
         EmitOpaqueAliases
         EmitTypeAliases
         EmitConstants

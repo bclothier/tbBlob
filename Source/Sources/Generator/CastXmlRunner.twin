@@ -179,26 +179,168 @@ Module CastXmlRunner
         FileSys.MakeDirs workFolder
         Dim work As String = FileSys.FullPath(workFolder)
         Dim headerFolder As String = FileSys.FullPath(o.HeaderFolder)
-        Dim entry As String = FileSys.JoinPath(headerFolder, o.EntryHeader)
-        If o.AlsoHeaders.Count > 0 Then
-            ' D-033: CastXML takes one input file, so the entry header and the --also headers go in one
-            Dim full As New Collection, h As Variant
-            For Each h In o.AlsoHeaders
-                full.Add FileSys.JoinPath(headerFolder, h)
-            Next
-            FileSys.WriteTextUtf8 work & "\tbblob_entry.h", EntryFileText(entry, full)
-            entry = work & "\tbblob_entry.h"
-        End If
         r.Xml86Path = work & "\castxml_x86.xml"
         r.Xml64Path = work & "\castxml_x64.xml"
         r.Macros86Path = work & "\macros_x86.txt"
         r.Macros64Path = work & "\macros_x64.txt"
         r.Preprocessed64Path = work & "\preprocessed_x64.i"
-        If Not RunPass(r, "x86", BuildScript(vc32, castxml, headerFolder, o.IncludeDirs, o.Defines, entry, r.Xml86Path, False), work, r.Xml86Path) Then Return r
-        If Not RunPass(r, "x64", BuildScript(vc64, castxml, headerFolder, o.IncludeDirs, o.Defines, entry, r.Xml64Path, False), work, r.Xml64Path) Then Return r
-        If Not RunPass(r, "macros_x86", BuildScript(vc32, castxml, headerFolder, o.IncludeDirs, o.Defines, entry, r.Macros86Path, True), work, r.Macros86Path) Then Return r
-        If Not RunPass(r, "macros_x64", BuildScript(vc64, castxml, headerFolder, o.IncludeDirs, o.Defines, entry, r.Macros64Path, True, r.Preprocessed64Path), work, r.Macros64Path, r.Preprocessed64Path) Then Return r
+        ' D-057: when a pass fails only because of --also headers, they are dropped and every pass
+        ' runs again (both architectures, so one source serves both); each round drops at least one
+        Dim also As New Collection, names As Collection, failing As Collection, full As Collection
+        Dim h As Variant, entry As String, pass As String, output As String, attempt As Long, s As SkippedHeader
+        For Each h In o.AlsoHeaders
+            also.Add h
+        Next
+        Do
+            attempt += 1
+            entry = FileSys.JoinPath(headerFolder, o.EntryHeader)
+            If also.Count > 0 Then
+                ' D-033: CastXML takes one input file, so the entry header and the --also headers go in one
+                Set full = New Collection
+                For Each h In also
+                    full.Add FileSys.JoinPath(headerFolder, h)
+                Next
+                FileSys.WriteTextUtf8 work & "\tbblob_entry.h", EntryFileText(entry, full)
+                entry = work & "\tbblob_entry.h"
+            End If
+            pass = RunPasses(r, vc32, vc64, castxml, headerFolder, o, entry, work)
+            If Len(pass) = 0 Or also.Count = 0 Then Return r
+            Set names = New Collection
+            names.Add o.EntryHeader
+            For Each h In also
+                names.Add h
+            Next
+            output = Tools.LastToolOutput
+            Set failing = FailingHeaders(output, entry, names)
+            If failing.Count = 0 Or Contains(failing, o.EntryHeader) Then Return r
+            AppendText work & "\castxml_" & pass & "_failed.txt", output
+            For Each h In failing
+                Set s = New SkippedHeader
+                s.Header = h
+                s.Pass = pass
+                Set s.ErrorLines = ErrorLinesFor(output, entry, names, h)
+                r.SkippedHeaders.Add s
+                RemoveItem also, h
+            Next
+            r.ExitCode = 0
+            r.ErrorText = ""
+        Loop
+    End Function
+
+    ' The four passes for entry; "" when all succeeded, else the name of the pass that failed (r
+    ' then says why, and Tools.LastToolOutput holds CastXML's output).
+    Private Function RunPasses(r As CastXmlResult, ByVal vc32 As String, ByVal vc64 As String, ByVal castxml As String, ByVal headerFolder As String, o As CliOptions, ByVal entry As String, ByVal work As String) As String
+        If Not RunPass(r, "x86", BuildScript(vc32, castxml, headerFolder, o.IncludeDirs, o.Defines, entry, r.Xml86Path, False), work, r.Xml86Path) Then Return "x86"
+        If Not RunPass(r, "x64", BuildScript(vc64, castxml, headerFolder, o.IncludeDirs, o.Defines, entry, r.Xml64Path, False), work, r.Xml64Path) Then Return "x64"
+        If Not RunPass(r, "macros_x86", BuildScript(vc32, castxml, headerFolder, o.IncludeDirs, o.Defines, entry, r.Macros86Path, True), work, r.Macros86Path) Then Return "macros_x86"
+        If Not RunPass(r, "macros_x64", BuildScript(vc64, castxml, headerFolder, o.IncludeDirs, o.Defines, entry, r.Macros64Path, True, r.Preprocessed64Path), work, r.Macros64Path, r.Preprocessed64Path) Then Return "macros_x64"
+        Return ""
+    End Function
+
+    Private Function Contains(c As Collection, ByVal text As String) As Boolean
+        Dim v As Variant
+        For Each v In c
+            If v = text Then Return True
+        Next
+        Return False
+    End Function
+
+    Private Sub RemoveItem(c As Collection, ByVal text As String)
+        Dim i As Long
+        For i = c.Count To 1 Step -1
+            If c(i) = text Then c.Remove i
+        Next
+    End Sub
+
+    Private Sub AppendText(ByVal path As String, ByVal text As String)
+        Dim prior As String
+        If FileSys.KindOf(path) = FileSys.KIND_FILE Then prior = FileSys.ReadTextUtf8(path) & vbCrLf
+        FileSys.WriteTextUtf8 path, prior & text
+    End Sub
+
+    ' ---- tracing errors to --also headers (D-057) --------------------------------------------
+
+    ' The headers a failed pass's errors trace back to, each once: names(1) is the entry header,
+    ' then the --also headers, as entryFile (tbblob_entry.h) includes them from line 2 on (line 1 is
+    ' its comment). Empty when any error does not trace to one of them -- an error in entryFile
+    ' itself, a CastXML error with no file, or one with no include frame: skipping headers would not
+    ' explain that failure. Warnings are ignored.
+    Public Function FailingHeaders(ByVal errorText As String, ByVal entryFile As String, names As Collection) As Collection
+        Dim r As New Collection, e As Variant
+        For Each e In TraceErrors(errorText, entryFile, names)
+            If Len(e(0)) = 0 Then Return New Collection
+            If Not Contains(r, e(0)) Then r.Add e(0)
+        Next
         Return r
+    End Function
+
+    ' CastXML's error lines that trace back to header (see FailingHeaders).
+    Public Function ErrorLinesFor(ByVal errorText As String, ByVal entryFile As String, names As Collection, ByVal header As String) As Collection
+        Dim r As New Collection, e As Variant
+        For Each e In TraceErrors(errorText, entryFile, names)
+            If e(0) = header Then r.Add e(1)
+        Next
+        Return r
+    End Function
+
+    ' Array(header or "", error line) for each error. clang prints a diagnostic's include stack
+    ' outermost first ("In file included from <file>:<line>:"), and leaves it out when the previous
+    ' diagnostic came from the same file.
+    Private Function TraceErrors(ByVal errorText As String, ByVal entryFile As String, names As Collection) As Collection
+        Dim r As New Collection
+        Dim lines() As String = Split(Replace(errorText, vbCr, ""), vbLf)
+        Dim i As Long, s As String, file As String, lastFile As String
+        Dim outermost As String, framed As String, inFrames As Boolean
+        For i = 0 To UBound(lines)
+            s = lines(i)
+            If Left$(s, 22) = "In file included from " Then
+                If Not inFrames Then framed = Mid$(s, 23)
+                inFrames = True
+            ElseIf DiagnosticFile(s, file) Then
+                If inFrames Then
+                    outermost = framed
+                ElseIf LCase$(file) <> LCase$(lastFile) Then
+                    outermost = ""      ' no stack: the compiled file itself
+                End If
+                inFrames = False
+                lastFile = file
+                If InStr(s, ": error: ") > 0 Or InStr(s, ": fatal error: ") > 0 Then r.Add Array(HeaderOfFrame(outermost, entryFile, names), s)
+            ElseIf Left$(s, 7) = "error: " Or Left$(s, 13) = "fatal error: " Then
+                r.Add Array("", s)      ' CastXML's own error, no file
+            End If
+        Next
+        Return r
+    End Function
+
+    ' True for a diagnostic line, "<file>:<line>:<column>: <kind>: <text>", with its file.
+    Private Function DiagnosticFile(ByVal s As String, ByRef file As String) As Boolean
+        Dim kind As Variant, p As Long
+        For Each kind In Array(": fatal error: ", ": error: ", ": warning: ", ": note: ")
+            p = InStr(s, kind)
+            If p > 0 Then Exit For
+        Next
+        If p = 0 Then Return False
+        Dim head As String = Left$(s, p - 1)
+        Dim c2 As Long = InStrRev(head, ":")
+        If c2 = 0 Then Return False
+        Dim c1 As Long = InStrRev(head, ":", c2 - 1)
+        If c1 = 0 Then Return False
+        If Not (Mid$(head, c1 + 1, c2 - c1 - 1) Like "#*") Or Not (Mid$(head, c2 + 1) Like "#*") Then Return False
+        file = Left$(head, c1 - 1)
+        Return True
+    End Function
+
+    ' The header that line n of entryFile includes, from a frame "<entryFile>:<n>:"; "" when the
+    ' frame is in another file or names no included header.
+    Private Function HeaderOfFrame(ByVal frame As String, ByVal entryFile As String, names As Collection) As String
+        If Len(frame) = 0 Then Return ""
+        If Right$(frame, 1) = ":" Then frame = Left$(frame, Len(frame) - 1)
+        Dim c As Long = InStrRev(frame, ":")
+        If c = 0 Then Return ""
+        If LCase$(FileSys.BaseName(Left$(frame, c - 1))) <> LCase$(FileSys.BaseName(entryFile)) Then Return ""
+        Dim n As Long = CLng(Val(Mid$(frame, c + 1)))
+        If n < 2 Or n - 1 > names.Count Then Return ""
+        Return names(n - 1)
     End Function
 
     ' Writes and runs castxml_<name>.cmd; False (with r filled in) when castxml failed or did not

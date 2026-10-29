@@ -125,6 +125,7 @@ of it the four CastXML passes and about 5 s tbBlob's own work.
     castxml_macros_x64.cmd, macros_x64.txt   the x64 compiler's macros
     preprocessed_x64.i       the headers after the x64 preprocessor (callback parameter names come from here)
     tbblob_entry.h           only with --also
+    castxml_<pass>_failed.txt  only when an --also header was skipped: CastXML's full output of the failed pass
 ```
 The `.cmd` scripts are exactly what ran. Run one by hand to see CastXML's full output when
 something fails. Generation is deterministic: the same inputs give byte-identical files.
@@ -136,6 +137,7 @@ loading them, then one section per kind of finding. Each entry gives its reason:
 
 | Section | What it lists |
 |---|---|
+| Headers skipped | `--also` headers CastXML could not read (a C++-only header, an `#error`, a missing dependency), each with the CastXML pass that failed and its error lines. Their functions and types are not generated; everything else is. See [A header CastXML cannot read](#a-header-castxml-cannot-read) |
 | Renamed | Names changed to avoid a collision. twinBASIC is case-insensitive, so `TBF_OPEN` and `tbf_open` collide. Each entry names the other item |
 | Type aliases | C typedefs and type-naming macros emitted as `Public Alias` |
 | Skipped macros | Macros that can't be twinBASIC constants (function-like, initializers, casts, cycles), each with the reason |
@@ -208,11 +210,29 @@ loading them, then one section per kind of finding. Each entry gives its reason:
 Your program needs only the library's DLL at run time. tbBlob, CastXML and Visual Studio are needed
 only to generate.
 
+## A header CastXML cannot read
+
+tbBlob reads headers as C. A header that needs C++ (`cairo-dwrite.h` stops with
+`#error DWrite font backend requires C++`), that `#error`s for another configuration, or whose
+dependencies aren't on the include path, makes CastXML fail. When that header was given with
+`--also`, tbBlob skips it, runs CastXML again without it, and generates everything else. The console
+says `tbBlob: warning: skipped <header>: <first error>`, and the report's "Headers skipped" section
+lists the header, the pass that failed (`x86`, `x64`, `macros_x86` or `macros_x64`) and CastXML's
+error lines. `Work\castxml_<pass>_failed.txt` holds CastXML's full output of that pass: read the
+`In file included from` lines from the top to see how the header was reached.
+
+A header is skipped only when every error traces back, through the include lines of
+`Work\tbblob_entry.h`, to `--also` headers. An error in the entry header, or one tbBlob can't trace,
+still stops the run (exit 1) as before. Fix such a header with `-I` (a missing dependency) or `-D` (a
+configuration macro), or leave it out. The functions of a skipped header still show up under
+"Exported but not declared" when you give the DLL itself.
+
 ## Known issues
 
 - **The Windows SDK's `webservices.h` cannot be read.** It declares two enums with no values
   (`WS_XML_BUFFER_PROPERTY_ID` and `WS_SECURITY_ALGORITHM_PROPERTY_ID`; SDK 10.0.22621 and
   10.0.26100). MSVC accepts that; Clang, which CastXML is built on, rejects it in C
   (`webservices.h:695:1: error: use of empty enum`), and no option turns the error off. A library
-  whose headers include `webservices.h` therefore fails in the CastXML pass (exit 1). Not fixed yet
-  (D-061).
+  whose entry header includes `webservices.h` therefore fails in the CastXML pass (exit 1); an
+  `--also` header that includes it is skipped and reported (see
+  [A header CastXML cannot read](#a-header-castxml-cannot-read)). Not fixed yet (D-061).

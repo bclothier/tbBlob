@@ -1,0 +1,7 @@
+' An --also header CastXML could not read, skipped so the rest of the library still generates
+' (D-057): which header, the pass that failed, and CastXML's error lines that trace to it.
+Class SkippedHeader
+    Public Header As String         ' as given to --also, relative to the header folder
+    Public Pass As String           ' the CastXML pass that failed: x86, x64, macros_x86 or macros_x64
+    Public ErrorLines As Collection ' CastXML's error lines (file:line:col: error: ...) for this header
+End Class

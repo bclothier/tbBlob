@@ -79,6 +79,7 @@
 | D-060 | Issue #1 | Task-only | Callback parameter names come from the compiler's preprocessed headers (castxml -E), not the raw header text | Active |
 | D-061 | Issue #1 | Finding | Known issue: CastXML (C mode) cannot read the SDK's webservices.h — two empty enums | Active |
 | D-062 | 26.0 | Task-only | D-053 as built: project named after the entry header for a DLL folder; multi-DLL loader raises; libgit2 loses 9 unexported declares; --keep-unexported | Active |
+| D-063 | 26a.0 | Task-only | D-057 as built: any untraceable error stays fatal; clang's omitted include stacks; one failed-output file per pass | Active |
 
 ---
 ### D-001 — tB UDT layout equals C natural alignment for all 85 libgit2 structs, both archs (Task: Spike)
@@ -833,3 +834,19 @@
   - Tests: the `--dll` / `--x86-dll` command-line tests live in `Tests_Dlls` with the rest of the task's tests, not in `Tests_Cli`. Method: not red-first — `DllSet`, the emitter/pipeline signatures and the tests were written together and compiled once; the bare-name snapshot test pins the old behaviour.
 - Rationale: an entry header names a library better than a folder does; raising matches the existing loader and the harness's checks; skipping an unexported function is D-053's point, and the libgit2 diff shows it removes exactly the declares that could never be called.
 - Alternatives considered: `--name` required with a folder (needless when the entry header names the library); a multi-DLL `Load` returning 0 on failure (silently half-loaded); keeping a `NOTE`ed declare for unexported functions in folder mode (a call that cannot work).
+
+---
+### D-063 — D-057 as built: details settled while implementing task 26a.0 (Task 26a.0)
+- Date: 2026-10-28
+- Scope: Task-only
+- Status: Active
+- Context: implementing D-057 against CastXML's real output (`tests\fixture-c\tbfixture_cpp.h` `#error`s unless C++, `tbfixture_missing.h` includes a header that does not exist).
+- Decision:
+  - **All or nothing per failed pass.** Headers are skipped only when every `error:` / `fatal error:` line traces, through the outermost `In file included from <...>\tbblob_entry.h:<n>:` frame, to an `--also` header. One error that traces nowhere (in `tbblob_entry.h` itself, a CastXML error with no file, a diagnostic with no frame) or to the entry header keeps the failure fatal, as before: skipping headers would not explain it. Warnings never count.
+  - **Omitted include stacks.** clang prints a diagnostic's include stack only when it differs from the previous diagnostic's; a diagnostic with no frames in the same file as the previous one inherits its stack (a second `error:` in the same skipped header traces there too).
+  - **Observed:** a missing include is a `fatal error`, but clang had already reported the earlier `#error` header, so both headers were skipped in one retry. Each retry drops at least one header, so the loop ends.
+  - **Observed (the user asked whether errors are local to a file):** clang recovers and keeps parsing after an ordinary error (a header with valid declarations around `typedef enum {} X;` and `int x = ;` reported both errors), but CastXML then writes **no XML at all** (exit 1, no `-o` file): one error anywhere in the translation unit, even inside an SDK header, loses the whole pass. A fatal error (missing include) stops parsing, and clang lists at most 20 errors, so a retry can surface errors the first run did not show. Dropping a whole `--also` header is therefore the finest unit tbBlob can skip without editing headers. With `--also mylib_ws.h` including `<webservices.h>` (D-061), the run succeeds and reports `mylib_ws.h` with both `webservices.h:695:1` / `:1603:1: error: use of empty enum` lines.
+  - The failed pass's output goes to `Work\castxml_<pass>_failed.txt` (`<pass>` is `x86`, `x64`, `macros_x86` or `macros_x64`), appended when a later retry fails in the same pass. The report section is first in the report ("Headers skipped"), and is `- none` when nothing was skipped.
+  - Method: not red-first. `FailingHeaders`/`ErrorLinesFor` and their tests were written together against captured CastXML output and compiled once.
+- Rationale: a run that succeeds must have failed only because of the headers it dropped; anything else is a problem the user has to see.
+- Alternatives considered: skipping the traced headers and ignoring the untraced errors (the retry would fail anyway, with a less clear message).

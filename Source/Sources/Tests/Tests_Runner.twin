@@ -17,6 +17,12 @@ Module Tests_Runner
         SelfTest.Add "runner: QuoteArg doubles backslashes before a quote and escapes quotes, by the C runtime's rules (D-056)", MODULE_ID, 11
         SelfTest.Add "runner: scripts quote -I, -D, -o, castxml and the entry header with QuoteArg; vcvars keeps cmd quoting (D-056)", MODULE_ID, 12
         SelfTest.Add "castxml: a header folder and an -I folder ending in a backslash work (D-056)", MODULE_ID, 13, True
+        SelfTest.Add "runner: an error in an --also header traces through tbblob_entry.h to that header (D-057)", MODULE_ID, 14
+        SelfTest.Add "runner: an error two includes deep traces to the top-level --also header (D-057)", MODULE_ID, 15
+        SelfTest.Add "runner: errors in two headers give both; a warning does not count; a repeated include stack is reused (D-057)", MODULE_ID, 16
+        SelfTest.Add "runner: an error in the entry header, in tbblob_entry.h, without a frame or without a file traces to no skippable header (D-057)", MODULE_ID, 17
+        SelfTest.Add "runner: warnings alone give no failing header (D-057)", MODULE_ID, 18
+        SelfTest.Add "pipeline: the report's 'Headers skipped' lists each header, its pass and CastXML's error lines (D-057)", MODULE_ID, 19
     End Sub
 
     Public Sub RunTest(ByVal index As Long)
@@ -34,6 +40,12 @@ Module Tests_Runner
             Case 11: QuoteArgRules
             Case 12: ScriptArgQuoting
             Case 13: TrailingBackslashRun
+            Case 14: TraceOneHeader
+            Case 15: TraceTwoDeep
+            Case 16: TraceTwoHeaders
+            Case 17: TraceNotSkippable
+            Case 18: TraceWarningsOnly
+            Case 19: SkippedReport
             Case Else: Err.Raise SelfTest.CHECK_FAILED, , "no test " & index & " in Tests_Runner"
         End Select
     End Sub
@@ -271,6 +283,112 @@ Module Tests_Runner
         SelfTest.AssertTrue "exit code 0", r.ExitCode = 0, "exit " & r.ExitCode & ": " & r.ErrorText
         SelfTest.AssertTrue "x64 XML has the fixture's functions", InStr(x64, "name=""tbf_ret_char""") > 0, "length " & Len(x64)
         SelfTest.AssertTrue "the preprocess line ran too (D-060)", InStr(pre, "tbf_ret_char") > 0, "length " & Len(pre)
+    End Sub
+
+    ' ---- D-057: tracing CastXML errors to --also headers ------------------------------------
+
+    Private Const TEST_ENTRY As String = "C:\w\tbblob_entry.h"
+
+    Private Function ErrText(ParamArray lines() As Variant) As String
+        Dim v As Variant, s As String
+        For Each v In lines
+            s &= v & vbCrLf
+        Next
+        Return s
+    End Function
+
+    Private Function Joined(c As Collection) As String
+        Dim v As Variant, s As String
+        For Each v In c
+            s &= v & "|"
+        Next
+        Return s
+    End Function
+
+    Private Function NameList(ByVal names As String) As Collection
+        Dim c As New Collection, v As Variant
+        For Each v In Split(names, "|")
+            c.Add CStr(v)
+        Next
+        Return c
+    End Function
+
+    ' cairo-dwrite.h's shape (D-052, D-059): line 4 of tbblob_entry.h includes the third header.
+    Private Sub TraceOneHeader()
+        Dim t As String = ErrText("In file included from C:\w\tbblob_entry.h:4:", _
+            "C:/inc/cairo/cairo-dwrite.h:65:2: error: DWrite font backend requires C++", _
+            "   65 | #error DWrite font backend requires C++", "      |  ^", "1 error generated.")
+        Dim names As Collection = NameList("cairo.h|cairo-pdf.h|cairo-dwrite.h")
+        SelfTest.AssertEq "header", Joined(CastXmlRunner.FailingHeaders(t, TEST_ENTRY, names)), "cairo-dwrite.h|"
+        SelfTest.AssertEq "its error line", Joined(CastXmlRunner.ErrorLinesFor(t, TEST_ENTRY, names, "cairo-dwrite.h")), _
+            "C:/inc/cairo/cairo-dwrite.h:65:2: error: DWrite font backend requires C++|"
+    End Sub
+
+    Private Sub TraceTwoDeep()
+        Dim t As String = ErrText("In file included from C:\w\tbblob_entry.h:3:", _
+            "In file included from C:/inc/cairo/cairo-ft.h:45:", _
+            "C:/inc/ft2build.h:1:10: fatal error: 'freetype/config/ftheader.h' file not found", "1 error generated.")
+        SelfTest.AssertEq "the top-level header", Joined(CastXmlRunner.FailingHeaders(t, TEST_ENTRY, NameList("cairo.h|cairo-ft.h|cairo-dwrite.h"))), "cairo-ft.h|"
+    End Sub
+
+    ' The run's real output shape, plus a second error in the same file (clang prints no stack for it).
+    Private Sub TraceTwoHeaders()
+        Dim t As String = ErrText("In file included from C:\w\tbblob_entry.h:3:", _
+            "C:/fx/tbfixture_sys.h:3:12: warning: '/*' within block comment [-Wcomment]", _
+            "    3 |  * git2/sys/*.h are not included by git2.h.", "      |            ^", _
+            "In file included from C:\w\tbblob_entry.h:4:", _
+            "C:/fx/tbfixture_cpp.h:7:2: error: tbfixture_cpp.h requires C++", _
+            "    7 | #error tbfixture_cpp.h requires C++", "      |  ^", _
+            "C:/fx/tbfixture_cpp.h:9:1: error: a second error in the same file", _
+            "In file included from C:\w\tbblob_entry.h:5:", _
+            "C:/fx/tbfixture_missing.h:6:10: fatal error: 'tbfixture_no_such_dependency.h' file not found", _
+            "1 warning and 3 errors generated.")
+        Dim names As Collection = NameList("tbfixture.h|tbfixture_sys.h|tbfixture_cpp.h|tbfixture_missing.h")
+        SelfTest.AssertEq "both, not the one with a warning", Joined(CastXmlRunner.FailingHeaders(t, TEST_ENTRY, names)), "tbfixture_cpp.h|tbfixture_missing.h|"
+        SelfTest.AssertEq "both errors of the first", CastXmlRunner.ErrorLinesFor(t, TEST_ENTRY, names, "tbfixture_cpp.h").Count, 2
+        SelfTest.AssertEq "the fatal error of the second", Joined(CastXmlRunner.ErrorLinesFor(t, TEST_ENTRY, names, "tbfixture_missing.h")), _
+            "C:/fx/tbfixture_missing.h:6:10: fatal error: 'tbfixture_no_such_dependency.h' file not found|"
+    End Sub
+
+    Private Sub TraceNotSkippable()
+        Dim names As Collection = NameList("tbfixture.h|tbfixture_cpp.h")
+        Dim inEntry As String = ErrText("In file included from C:\w\tbblob_entry.h:2:", "C:/fx/tbfixture.h:10:1: error: in the entry header")
+        SelfTest.AssertEq "the entry header (the caller treats it as fatal)", Joined(CastXmlRunner.FailingHeaders(inEntry, TEST_ENTRY, names)), "tbfixture.h|"
+        Dim inEntryFile As String = ErrText("C:\w\tbblob_entry.h:3:10: fatal error: 'x.h' file not found")
+        SelfTest.AssertEq "tbblob_entry.h itself", CastXmlRunner.FailingHeaders(inEntryFile, TEST_ENTRY, names).Count, 0
+        Dim noFrame As String = ErrText("C:/fx/other.c:1:1: error: no include frame")
+        SelfTest.AssertEq "no include frame", CastXmlRunner.FailingHeaders(noFrame, TEST_ENTRY, names).Count, 0
+        Dim noFile As String = ErrText("error: no input files")
+        SelfTest.AssertEq "CastXML's own error", CastXmlRunner.FailingHeaders(noFile, TEST_ENTRY, names).Count, 0
+        Dim mixed As String = ErrText("In file included from C:\w\tbblob_entry.h:3:", "C:/fx/tbfixture_cpp.h:7:2: error: requires C++", "error: no input files")
+        SelfTest.AssertEq "one traced and one not: nothing to skip", CastXmlRunner.FailingHeaders(mixed, TEST_ENTRY, names).Count, 0
+    End Sub
+
+    Private Sub TraceWarningsOnly()
+        Dim t As String = ErrText("In file included from C:\w\tbblob_entry.h:3:", "C:/fx/tbfixture_sys.h:3:12: warning: '/*' within block comment [-Wcomment]", "1 warning generated.")
+        SelfTest.AssertEq "nothing", CastXmlRunner.FailingHeaders(t, TEST_ENTRY, NameList("tbfixture.h|tbfixture_sys.h")).Count, 0
+    End Sub
+
+    Private Sub SkippedReport()
+        Dim s As New SkippedHeader
+        s.Header = "tbfixture_cpp.h"
+        s.Pass = "x86"
+        Set s.ErrorLines = NameList("C:/fx/tbfixture_cpp.h:7:2: error: tbfixture_cpp.h requires C++|C:/fx/tbfixture_cpp.h:9:1: error: another")
+        Dim skipped As New Collection
+        skipped.Add s
+        Dim t As String = SelfTest.NewTempFolder()
+        Console.StartCapture
+        Dim code As Long = Pipeline.GenerateFrom(SelfTest.Fixture("tbfixture_x86.xml"), SelfTest.Fixture("tbfixture_x64.xml"), SelfTest.Fixture("tbfixture_macros_x86.txt"), _
+            SelfTest.Fixture("tbfixture_macros_x64.txt"), SelfTest.Fixture("tbfixture_x64.i"), RepoRoot() & "\tests\fixture-c", Tests_Dlls.Named("tbfixture.dll"), "tbfixture", t & "\out", skipped)
+        Dim ignored As String = Console.StopCapture()
+        Dim report As String
+        If code = 0 Then report = FileSys.ReadTextUtf8(t & "\out\report.md")
+        FileSys.RemovePath t
+        SelfTest.AssertEq "exit code", code, 0
+        SelfTest.AssertTrue "section with the header, its pass and each error line", InStr(report, vbCrLf & "## Headers skipped" & vbCrLf & _
+            "- tbfixture_cpp.h (x86 pass): CastXML could not read it, so its functions and types are not generated. CastXML said:" & vbCrLf & _
+            "  - C:/fx/tbfixture_cpp.h:7:2: error: tbfixture_cpp.h requires C++" & vbCrLf & _
+            "  - C:/fx/tbfixture_cpp.h:9:1: error: another" & vbCrLf) > 0, Left$(report, 800)
     End Sub
 
     Private Sub BrokenHeaderFails()

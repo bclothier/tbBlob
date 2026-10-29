@@ -16,6 +16,7 @@ Module Tests_EndToEnd
         SelfTest.Add "end to end: libgit2 gives 848 declares and the D-011 renames", MODULE_ID, 9, True
         SelfTest.Add "pipeline: a failure while generating names the item, its header and the original error", MODULE_ID, 10
         SelfTest.Add "end to end: --also adds the extra header's module (D-033)", MODULE_ID, 11, True
+        SelfTest.Add "end to end: --also headers CastXML cannot read are skipped and reported; the rest is generated as without them; a bad entry header still fails (D-057)", MODULE_ID, 12, True
     End Sub
 
     Public Sub RunTest(ByVal index As Long)
@@ -31,6 +32,7 @@ Module Tests_EndToEnd
             Case 9: LibGit2EndToEnd
             Case 10: FailureNamesItem
             Case 11: AlsoEndToEnd
+            Case 12: SkipUnreadableHeaders
             Case Else: Err.Raise SelfTest.CHECK_FAILED, , "no test " & index & " in Tests_EndToEnd"
         End Select
     End Sub
@@ -189,6 +191,45 @@ Module Tests_EndToEnd
         SelfTest.AssertEq "Source", src, "tbfixture.twin;tbfixture_LayoutCheck.twin;tbfixture_Loader.twin;"
         SelfTest.AssertEq "Work", work, "castxml_macros_x64.cmd;castxml_macros_x86.cmd;castxml_x64.cmd;castxml_x64.xml;castxml_x86.cmd;castxml_x86.xml;macros_x64.txt;macros_x86.txt;preprocessed_x64.i;"
         SelfTest.AssertEq "the .twin files import (test-only check)", importCode, 0
+    End Sub
+
+    ' Every file in folder with its text, for comparing two Source\ folders.
+    Private Function FolderText(ByVal folder As String) As String
+        Dim n() As String, c As Long, i As Long, s As String
+        If FileSys.KindOf(folder) <> FileSys.KIND_FOLDER Then Return "(none)"
+        c = FileSys.ListNames(folder, n)
+        TextKit.SortOrdinal n, c
+        For i = 0 To c - 1
+            s &= "== " & n(i) & vbCrLf & FileSys.ReadTextUtf8(folder & "\" & n(i))
+        Next
+        Return s
+    End Function
+
+    Private Sub SkipUnreadableHeaders()
+        Dim root As String = SelfTest.RepoRoot()
+        Dim t As String = SelfTest.NewTempFolder()
+        Dim common As String = root & "\tests\fixture-c|tbfixture.h|tbfixture.dll|"
+        Dim cx As String = "|--castxml|" & RepoCastXml()
+        Dim outBad As String, outGood As String, outEntry As String
+        Dim codeBad As Long = RunCli(common & t & "\bad" & cx & "|--also|tbfixture_sys.h|--also|tbfixture_cpp.h|--also|tbfixture_missing.h", outBad)
+        Dim codeGood As Long = RunCli(common & t & "\good" & cx & "|--also|tbfixture_sys.h", outGood)
+        Dim codeEntry As Long = RunCli(root & "\tests\fixture-c|tbfixture_cpp.h|tbfixture.dll|" & t & "\entry" & cx & "|--also|tbfixture_sys.h", outEntry)
+        Dim badSource As String = FolderText(t & "\bad\Source")
+        Dim goodSource As String = FolderText(t & "\good\Source")
+        Dim report As String, work As String
+        If codeBad = 0 Then report = FileSys.ReadTextUtf8(t & "\bad\report.md")
+        work = Names(t & "\bad\Work")
+        FileSys.RemovePath t
+        SelfTest.AssertTrue "exit code 0", codeBad = 0, outBad
+        SelfTest.AssertTrue "the same Source\ as without the two headers", badSource = goodSource And Len(goodSource) > 1000, "lengths " & Len(badSource) & ", " & Len(goodSource)
+        SelfTest.AssertTrue "console warning for the C++-only header", InStr(outBad, "tbBlob: warning: skipped tbfixture_cpp.h: ") > 0 And InStr(outBad, "error: tbfixture_cpp.h requires C++") > 0, outBad
+        SelfTest.AssertTrue "console warning for the missing dependency", InStr(outBad, "tbBlob: warning: skipped tbfixture_missing.h: ") > 0, outBad
+        SelfTest.AssertTrue "report: the C++-only header", InStr(report, vbCrLf & "- tbfixture_cpp.h (x86 pass): CastXML could not read it") > 0, Left$(report, 1500)
+        SelfTest.AssertTrue "report: its error", InStr(report, "error: tbfixture_cpp.h requires C++") > 0, Left$(report, 1500)
+        SelfTest.AssertTrue "report: the missing dependency", InStr(report, "fatal error: 'tbfixture_no_such_dependency.h' file not found") > 0, Left$(report, 1500)
+        SelfTest.AssertTrue "Work\ keeps the failed pass's output", InStr(work, "castxml_x86_failed.txt;") > 0, work
+        SelfTest.AssertEq "a bad entry header fails as before", codeEntry, MainModule.EXIT_FAILED
+        SelfTest.AssertTrue "and says why", InStr(outEntry, "requires C++") > 0, outEntry
     End Sub
 
     Private Sub AlsoEndToEnd()
