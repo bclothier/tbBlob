@@ -9,7 +9,6 @@ Module Console
     Private Declare PtrSafe Function CommandLineToArgvW Lib "shell32" (ByVal lpCmdLine As LongPtr, ByRef pNumArgs As Long) As LongPtr
     Private Declare PtrSafe Function LocalFree Lib "kernel32" (ByVal hMem As LongPtr) As LongPtr
     Private Declare PtrSafe Function lstrlenW Lib "kernel32" (ByVal lpString As LongPtr) As Long
-    Private Declare PtrSafe Sub RtlMoveMemory Lib "kernel32" (ByVal Destination As LongPtr, ByVal Source As LongPtr, ByVal Length As LongPtr)
 
     Private Const STD_OUTPUT_HANDLE As Long = -11
     Private Const STD_ERROR_HANDLE As Long = -12
@@ -85,7 +84,7 @@ Module Console
         If argc = 0 Then Return EmptyArray()
         ReDim r(0 To argc - 1)
         For i = 0 To argc - 1
-            RtlMoveMemory VarPtr(p), argv + i * LenB(p), LenB(p)
+            vbaCopyBytes LenB(p), VarPtr(p), argv + i * LenB(p)     ' tB's native copy (D-067)
             r(i) = Utf16FromPtr(p)
         Next
         LocalFree argv
@@ -95,7 +94,7 @@ Module Console
     Private Function Utf16FromPtr(ByVal p As LongPtr) As String
         Dim n As Long = lstrlenW(p)
         Dim s As String = String$(n, vbNullChar)
-        If n > 0 Then RtlMoveMemory StrPtr(s), p, 2 * n
+        If n > 0 Then vbaCopyBytes 2 * n, StrPtr(s), p
         Return s
     End Function
 End Module
